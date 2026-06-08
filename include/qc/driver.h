@@ -10,6 +10,7 @@ enum class OutputKind { Object, Assembly, IR, CheckOnly };
 
 struct CompileOptions {
     std::vector<std::string> inputs;
+    std::vector<std::string> includePaths;
     std::string              output;          // -o
     InputLang                lang     = InputLang::Auto;
     OutputKind               outKind  = OutputKind::Object;

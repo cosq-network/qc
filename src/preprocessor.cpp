@@ -173,9 +173,22 @@ void Preprocessor::handleDirective(Token hashTok) {
             return;
         }
         
-        // Very basic resolution: try current dir
+        // Basic resolution: try current dir then include paths
         std::filesystem::path p = filename;
-        if (!std::filesystem::exists(p)) {
+        bool found = std::filesystem::exists(p);
+        
+        if (!found) {
+            for (const auto& path : includePaths_) {
+                std::filesystem::path tp = std::filesystem::path(path) / filename;
+                if (std::filesystem::exists(tp)) {
+                    p = tp;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
             diag_.error(dir.loc, "cannot find included file: " + filename);
             return;
         }

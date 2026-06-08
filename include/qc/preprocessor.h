@@ -15,6 +15,8 @@ class Preprocessor {
 public:
     Preprocessor(Lexer& mainLexer, DiagEngine& diag);
 
+    void addIncludePath(std::string path) { includePaths_.push_back(std::move(path)); }
+
     Token next();
     Token peek();
     void  putBack(Token tok);
@@ -38,6 +40,7 @@ private:
     Lexer&      mainLexer_;
     DiagEngine& diag_;
 
+    std::vector<std::string>  includePaths_;
     std::vector<IncludeState> includeStack_;
     std::unordered_map<std::string, Macro> macros_;
     std::optional<Token> putBack_;

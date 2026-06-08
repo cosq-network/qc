@@ -71,6 +71,9 @@ target_compile_definitions(qc PRIVATE
 # Install
 install(TARGETS qc RUNTIME DESTINATION bin)
 
+# Standard Library
+add_subdirectory(stdqc)
+
 # Tests (optional)
 option(QC_BUILD_TESTS "Build tests" OFF)
 if(QC_BUILD_TESTS)

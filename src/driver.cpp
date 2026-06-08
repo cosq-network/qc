@@ -131,6 +131,9 @@ int Driver::compileFile(const std::string& path) {
 
     // 4.5. Preprocess
     Preprocessor pp(lex, diag);
+    for (const auto& path : opts_.includePaths) {
+        pp.addIncludePath(path);
+    }
 
     // 5. Parse
     Parser parser(pp, types, diag);
@@ -262,6 +265,7 @@ static void printUsage(const char* prog) {
         "\n"
         "Options:\n"
         "  -o <file>        Write output to <file>\n"
+        "  -I <dir>         Add <dir> to include search path\n"
         "  -S               Output assembly instead of object code\n"
         "  -emit-ir         Output IR text (.ll)\n"
         "  -fsyntax-only    Only run syntax and semantic checks\n"
@@ -293,6 +297,14 @@ int driverMain(int argc, char** argv) {
                 return 1;
             }
             opts.output = argv[++i];
+        } else if (arg == "-I") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "qc: error: -I requires an argument\n");
+                return 1;
+            }
+            opts.includePaths.push_back(argv[++i]);
+        } else if (arg.size() > 2 && arg.substr(0, 2) == "-I") {
+            opts.includePaths.push_back(arg.substr(2));
         } else if (arg == "-S") {
             opts.outKind = OutputKind::Assembly;
         } else if (arg == "-emit-ir" || arg == "--emit-ir") {

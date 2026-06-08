@@ -1,0 +1,13 @@
+#ifndef STDQC_CSTDDEF_H
+#define STDQC_CSTDDEF_H
+
+#include <stddef.h>
+
+namespace std {
+    using ::size_t;
+    using ::ptrdiff_t;
+    
+    enum class byte : unsigned char {};
+}
+
+#endif // STDQC_CSTDDEF_H
