@@ -154,6 +154,11 @@ public:
     ELFSection& rodataSection() { return getSection(".rodata", SHT_PROGBITS, SHF_ALLOC | SHF_MERGE, 8); }
     ELFSection& bssSection()    { return getSection(".bss",    SHT_NOBITS,   SHF_ALLOC | SHF_WRITE, 8); }
 
+    ELFSection& debugLineSection()   { return getSection(".debug_line",   SHT_PROGBITS, 0, 1); }
+    ELFSection& debugInfoSection()   { return getSection(".debug_info",   SHT_PROGBITS, 0, 1); }
+    ELFSection& debugAbbrevSection() { return getSection(".debug_abbrev", SHT_PROGBITS, 0, 1); }
+    ELFSection& debugStrSection()    { return getSection(".debug_str",    SHT_PROGBITS, SHF_MERGE | SHF_STRINGS, 1); }
+
     ELFSection& getSection(std::string name, u32 type, u64 flags, u32 align);
 
     // Symbol management

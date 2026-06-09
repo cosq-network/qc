@@ -7,6 +7,7 @@
 #include "qc/common.h"
 #include "qc/elf_writer.h"
 #include "qc/pe_writer.h"
+#include "qc/dwarf.h"
 
 #include <cstdio>
 #include <string>
@@ -86,6 +87,11 @@ static bool typeIsFloat(const Type* t) {
 // ---------------------------------------------------------------------------
 // Per-function context
 // ---------------------------------------------------------------------------
+struct ARM64LineInfo {
+    u64 offset;
+    SourceLocation loc;
+};
+
 struct ARM64FuncCtx {
     std::unordered_map<u64, u32> virToPhys;
     std::unordered_map<u64, i32> spillSlots; // sp-relative offset
@@ -95,11 +101,24 @@ struct ARM64FuncCtx {
     bool usedCalleeFPR[32] = {};
 
     std::vector<std::string> lines;
+    std::vector<ARM64LineInfo> lineInfos;
+    u64                      currentOffset = 0;
+    SourceLocation           lastLoc;
     std::string fnName;
 
-    void emit(std::string s)     { lines.push_back(std::move(s)); }
-    void emitLabel(const std::string& l) { lines.push_back(l + ":"); }
-    void emitInst(const std::string& s)  { lines.push_back("    " + s); }
+    void setLoc(SourceLocation loc) {
+        if (loc.file && (loc.line != lastLoc.line || loc.file != lastLoc.file)) {
+            lineInfos.push_back({currentOffset, loc});
+            lastLoc = loc;
+        }
+    }
+
+    void emit(std::string s) {
+        currentOffset += s.length() + 1; // +1 for \n
+        lines.push_back(std::move(s));
+    }
+    void emitLabel(const std::string& l) { emit(l + ":"); }
+    void emitInst(const std::string& s)  { emit("    " + s); }
 };
 
 // ---------------------------------------------------------------------------
@@ -108,7 +127,9 @@ struct ARM64FuncCtx {
 class ARM64CodeGen : public CodeGen {
 public:
     explicit ARM64CodeGen(const TargetInfo& target, DiagEngine& diag)
-        : target_(target), diag_(diag) {}
+        : target_(target), diag_(diag) {
+        isMachO_ = (target_.format == TargetFormat::PE || target_.os == TargetOS::MacOS);
+    }
 
     void compile(const IRModule& mod) override;
     void emitAssembly(FILE* out) override;
@@ -147,9 +168,15 @@ private:
     std::string fpOff(i32 off, ARM64FuncCtx& ctx);
     std::string localLabel(const std::string& fn, const std::string& bb);
 
+    // Saved output state
+    struct LineInfo {
+        u64 offset;
+        SourceLocation loc;
+    };
     struct FnOutput {
         std::string name;
         std::vector<std::string> lines;
+        std::vector<LineInfo> lineInfos;
         bool isExtern = false;
     };
 
@@ -170,6 +197,11 @@ private:
 
     TargetInfo  target_;
     DiagEngine& diag_;
+    bool        debugEnabled_ = false;
+    bool        isMachO_      = false;
+
+public:
+    void setDebugEnabled(bool e) override { debugEnabled_ = e; }
 };
 
 // ---------------------------------------------------------------------------
@@ -201,8 +233,19 @@ void ARM64CodeGen::allocateRegisters(const IRFunction& fn, ARM64FuncCtx& ctx) {
     // We spill everything to the stack for simplicity.
 
     u32 numValues = (u32)fn.nextReg;
+    i32 spillSize = numValues * 8;
 
-    ctx.frameSize = 16 + (numValues * 8);
+    // Count alloca instructions to add their sizes
+    i32 allocaSize = 0;
+    for (auto& bb : fn.blocks) {
+        for (auto& ins : bb.instrs) {
+            if (ins.op == IROpcode::Alloca && ins.opType) {
+                allocaSize += (i32)((ins.opType->size() + 7) & ~7u);
+            }
+        }
+    }
+
+    ctx.frameSize = 16 + spillSize + allocaSize;
     // Align to 16
     ctx.frameSize = (ctx.frameSize + 15) & ~15;
 
@@ -218,6 +261,13 @@ void ARM64CodeGen::allocateRegisters(const IRFunction& fn, ARM64FuncCtx& ctx) {
 u32 ARM64CodeGen::loadGPR(const IRValue& v, ARM64FuncCtx& ctx, u32 scratch) {
     if (v.kind == IRValueKind::Constant) {
         ctx.emitInst("mov " + std::string(xRegName(scratch)) + ", #" + std::to_string(v.id));
+        return scratch;
+    }
+    if (v.kind == IRValueKind::Global) {
+        std::string sym = v.name;
+        if (isMachO_) sym = "_" + sym;
+        ctx.emitInst("adrp " + std::string(xRegName(scratch)) + ", " + sym + "@PAGE");
+        ctx.emitInst("add " + std::string(xRegName(scratch)) + ", " + xRegName(scratch) + ", " + sym + "@PAGEOFF");
         return scratch;
     }
     if (v.kind == IRValueKind::Register) {
@@ -288,6 +338,21 @@ void ARM64CodeGen::compileFunction(const IRFunction& fn) {
         }
     }
 
+    // --- Alloca initialization ---
+    u32 numValues = (u32)fn.nextReg;
+    i32 allocaOff = numValues * 8;
+    for (auto& bb : fn.blocks) {
+        for (auto& ins : bb.instrs) {
+            if (ins.op == IROpcode::Alloca && ins.opType) {
+                u32 sz = (u32)ins.opType->size();
+                sz = (sz + 7) & ~7u;
+                ctx.emitInst("add x9, sp, #" + std::to_string(allocaOff));
+                ctx.emitInst("str x9, " + spOff(ctx.spillSlots[ins.dst.id]));
+                allocaOff += sz;
+            }
+        }
+    }
+
     // --- Blocks ---
     for (auto& bb : fn.blocks) {
         ctx.emitLabel(localLabel(fn.name, bb.name));
@@ -299,10 +364,16 @@ void ARM64CodeGen::compileFunction(const IRFunction& fn) {
     FnOutput fo;
     fo.name  = fn.name;
     fo.lines = std::move(ctx.lines);
+    if (debugEnabled_) {
+        for (const auto& li : ctx.lineInfos) {
+            fo.lineInfos.push_back({li.offset, li.loc});
+        }
+    }
     fnOutputs_.push_back(std::move(fo));
 }
 
 void ARM64CodeGen::emitInstr(const IRInstr& ins, ARM64FuncCtx& ctx) {
+    if (debugEnabled_) ctx.setLoc(ins.loc);
     switch (ins.op) {
         case IROpcode::Alloca:  emitAlloca(ins, ctx); break;
         case IROpcode::Load:    emitLoad(ins, ctx);   break;
@@ -335,10 +406,8 @@ void ARM64CodeGen::emitInstr(const IRInstr& ins, ARM64FuncCtx& ctx) {
 }
 
 void ARM64CodeGen::emitAlloca(const IRInstr& ins, ARM64FuncCtx& ctx) {
-    u32 dstReg = REG_X9;
-    i32 off = ctx.spillSlots[ins.dst.id];
-    ctx.emitInst("add " + std::string(xRegName(dstReg)) + ", sp, #" + std::to_string(off));
-    ctx.emitInst("str " + std::string(xRegName(dstReg)) + ", " + spOff(ctx.spillSlots[ins.dst.id]));
+    // Handled in the prologue
+    (void)ins; (void)ctx;
 }
 
 void ARM64CodeGen::emitLoad(const IRInstr& ins, ARM64FuncCtx& ctx) {
@@ -444,7 +513,9 @@ void ARM64CodeGen::emitCall(const IRInstr& ins, ARM64FuncCtx& ctx) {
             ctx.emitInst("mov " + std::string(xRegName((u32)(i - 1))) + ", " + xRegName(r));
     }
 
-    ctx.emitInst("bl " + ins.srcs[0].name);
+    std::string sym = ins.srcs[0].name;
+    if (isMachO_) sym = "_" + sym;
+    ctx.emitInst("bl " + sym);
 
     if (ins.dst.kind == IRValueKind::Register) {
         ctx.emitInst("str x0, " + spOff(ctx.spillSlots[ins.dst.id]));
@@ -504,16 +575,22 @@ void ARM64CodeGen::compile(const IRModule& mod) {
 void ARM64CodeGen::emitAssembly(FILE* out) {
     fprintf(out, "// qc ARM64 assembly (AAPCS64, GAS syntax)\n\n");
 
-    bool useMachO = (target_.format == TargetFormat::PE || target_.os == TargetOS::MacOS);
-
     // .data
     bool hasData = false;
     for (auto& g : globOutputs_) {
         if (!g.isZeroInit && !g.isConst && (!g.initData.empty() || g.hasStringInit)) {
-            if (!hasData) { fprintf(out, ".section .data\n"); hasData = true; }
-            fprintf(out, ".global %s\n%s:\n", g.name.c_str(), g.name.c_str());
+            if (!hasData) {
+                if (isMachO_) fprintf(out, "\n.section __DATA,__data\n");
+                else          fprintf(out, "\n.section .data\n");
+                hasData = true;
+            }
+            std::string symName = g.name;
+            if (isMachO_) symName = "_" + symName;
+            fprintf(out, ".global %s\n%s:\n", symName.c_str(), symName.c_str());
             if (g.hasStringInit) {
-                fprintf(out, "    .ascii \"%s\"\n    .byte 0\n", g.stringInit.c_str());
+                std::string s = g.stringInit;
+                if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
+                fprintf(out, "    .ascii \"%s\"\n    .byte 0\n", s.c_str());
             } else {
                 fprintf(out, "    .byte");
                 for (size_t i = 0; i < g.initData.size(); ++i)
@@ -527,8 +604,14 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
     bool hasBss = false;
     for (auto& g : globOutputs_) {
         if (g.isZeroInit) {
-            if (!hasBss) { fprintf(out, "\n.section .bss\n"); hasBss = true; }
-            fprintf(out, ".global %s\n%s:\n    .zero %u\n", g.name.c_str(), g.name.c_str(), g.size);
+            if (!hasBss) {
+                if (isMachO_) fprintf(out, "\n.section __DATA,__bss\n");
+                else          fprintf(out, "\n.section .bss\n");
+                hasBss = true;
+            }
+            std::string symName = g.name;
+            if (isMachO_) symName = "_" + symName;
+            fprintf(out, ".global %s\n%s:\n    .zero %u\n", symName.c_str(), symName.c_str(), g.size);
         }
     }
 
@@ -536,10 +619,18 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
     bool hasRodata = false;
     for (auto& g : globOutputs_) {
         if (g.isConst && !g.isZeroInit && (!g.initData.empty() || g.hasStringInit)) {
-            if (!hasRodata) { fprintf(out, "\n.section .rodata\n"); hasRodata = true; }
-            fprintf(out, ".global %s\n%s:\n", g.name.c_str(), g.name.c_str());
+            if (!hasRodata) {
+                if (isMachO_) fprintf(out, "\n.section __TEXT,__const\n");
+                else          fprintf(out, "\n.section .rodata\n");
+                hasRodata = true;
+            }
+            std::string symName = g.name;
+            if (isMachO_) symName = "_" + symName;
+            fprintf(out, ".global %s\n%s:\n", symName.c_str(), symName.c_str());
             if (g.hasStringInit) {
-                fprintf(out, "    .ascii \"%s\"\n    .byte 0\n", g.stringInit.c_str());
+                std::string s = g.stringInit;
+                if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
+                fprintf(out, "    .ascii \"%s\"\n    .byte 0\n", s.c_str());
             } else {
                 fprintf(out, "    .byte");
                 for (size_t i = 0; i < g.initData.size(); ++i)
@@ -550,21 +641,124 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
     }
 
     // .text
-    fprintf(out, "\n.section .text\n\n");
+    if (isMachO_) fprintf(out, "\n.section __TEXT,__text\n\n");
+    else          fprintf(out, "\n.section .text\n\n");
 
     for (auto& fo : fnOutputs_) {
         if (fo.isExtern) {
             continue;
         }
-        fprintf(out, ".global %s\n", fo.name.c_str());
-        fprintf(out, ".type %s, %%function\n", fo.name.c_str());
+        std::string symName = fo.name;
+        if (isMachO_) symName = "_" + symName;
+        
+        fprintf(out, ".global %s\n", symName.c_str());
+        if (!isMachO_) fprintf(out, ".type %s, %%function\n", symName.c_str());
+        
         for (auto& line : fo.lines) {
-            if (!line.empty() && line.back() == ':')
-                fprintf(out, "%s\n", line.c_str());
-            else
-                fprintf(out, "    %s\n", line.c_str());
+            std::string l = line;
+            if (isMachO_ && !l.empty() && l.back() == ':') {
+                // Label
+                std::string lbl = l.substr(0, l.size() - 1);
+                // If it's the function name, add underscore
+                if (lbl == fo.name) lbl = "_" + lbl;
+                fprintf(out, "%s:\n", lbl.c_str());
+            } else if (!l.empty() && l.back() == ':') {
+                fprintf(out, "%s\n", l.c_str());
+            } else {
+                fprintf(out, "    %s\n", l.c_str());
+            }
         }
-        fprintf(out, ".size %s, .-%s\n\n", fo.name.c_str(), fo.name.c_str());
+        if (!isMachO_) fprintf(out, ".size %s, .-%s\n\n", symName.c_str(), symName.c_str());
+    }
+
+    // .debug_line
+    if (debugEnabled_) {
+        DWARFLineProgram lineProg;
+        std::unordered_map<std::string, u32> fileMap;
+        std::unordered_map<std::string, u64> fnOffsets;
+        std::unordered_map<std::string, u64> fnSizes;
+
+        u64 currentTextOff = 0;
+        for (auto& fo : fnOutputs_) {
+            if (fo.isExtern) continue;
+            fnOffsets[fo.name] = currentTextOff;
+            u64 size = 0;
+            for (auto& line : fo.lines) size += line.length() + 1;
+            fnSizes[fo.name] = size;
+            currentTextOff += size;
+        }
+
+        for (auto& fo : fnOutputs_) {
+            if (fo.isExtern) continue;
+            u64 fnOff = fnOffsets[fo.name];
+
+            for (auto& li : fo.lineInfos) {
+                if (!li.loc.file) continue;
+                u32 fIdx;
+                std::string filename = li.loc.file;
+                if (fileMap.count(filename)) {
+                    fIdx = fileMap[filename];
+                } else {
+                    fIdx = lineProg.addFile(filename, 0);
+                    fileMap[filename] = fIdx;
+                }
+
+                DWARFLineEntry entry;
+                entry.address = fnOff + li.offset;
+                entry.line = li.loc.line;
+                entry.column = li.loc.column;
+                entry.fileIndex = fIdx;
+                entry.isStmt = true;
+                entry.basicBlock = false;
+                entry.endSequence = false;
+                lineProg.addEntry(entry);
+            }
+
+            DWARFLineEntry endEntry;
+            endEntry.address = fnOff + fnSizes[fo.name];
+            endEntry.endSequence = true;
+            lineProg.addEntry(endEntry);
+        }
+
+        auto bytes = lineProg.emit();
+        if (isMachO_) fprintf(out, "\n.section __DWARF,__debug_line,regular,debug\n");
+        else          fprintf(out, "\n.section .debug_line\n");
+        
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            if (i % 16 == 0) fprintf(out, "\n    .byte ");
+            fprintf(out, "%s%u", (i % 16 == 0 ? "" : ","), bytes[i]);
+        }
+        fprintf(out, "\n");
+
+        // .debug_info
+        DWARFDebugInfo info;
+        std::string cuName = "test.c";
+        for (auto& fo : fnOutputs_) {
+            if (!fo.lineInfos.empty() && fo.lineInfos[0].loc.file) {
+                cuName = fo.lineInfos[0].loc.file;
+                break;
+            }
+        }
+        info.addCU(cuName, "qc version 0.1.0", 0);
+        auto infoBytes = info.emit();
+        if (isMachO_) fprintf(out, "\n.section __DWARF,__debug_info,regular,debug\n");
+        else          fprintf(out, "\n.section .debug_info\n");
+        for (size_t i = 0; i < infoBytes.size(); ++i) {
+            if (i % 16 == 0) fprintf(out, "\n    .byte ");
+            fprintf(out, "%s%u", (i % 16 == 0 ? "" : ","), infoBytes[i]);
+        }
+        fprintf(out, "\n");
+
+        // .debug_abbrev
+        DWARFAbbrev abbrev;
+        auto abbrevBytes = abbrev.emit();
+        if (isMachO_) fprintf(out, "\n.section __DWARF,__debug_abbrev,regular,debug\n");
+        else          fprintf(out, "\n.section .debug_abbrev\n");
+        for (size_t i = 0; i < abbrevBytes.size(); ++i) {
+            if (i % 16 == 0) fprintf(out, "\n    .byte ");
+            fprintf(out, "%s%u", (i % 16 == 0 ? "" : ","), abbrevBytes[i]);
+        }
+        fprintf(out, "\n");
     }
 }
 
@@ -607,6 +801,58 @@ std::vector<u8> ARM64CodeGen::emitObject() {
             sym.type         = STT_FUNC;
             sym.isExternal   = false;
             elf.addSymbol(sym);
+        }
+
+        // --- .debug_line ---
+        if (debugEnabled_) {
+            DWARFLineProgram lineProg;
+            std::unordered_map<std::string, u32> fileMap;
+
+            std::unordered_map<std::string, u64> fnOffsets;
+            std::unordered_map<std::string, u64> fnSizes;
+
+            u64 currentTextOff = 0;
+            for (auto& fo : fnOutputs_) {
+                if (fo.isExtern) continue;
+                fnOffsets[fo.name] = currentTextOff;
+                u64 size = 0;
+                for (auto& line : fo.lines) size += line.length() + 1;
+                fnSizes[fo.name] = size;
+                currentTextOff += size;
+            }
+
+            for (auto& fo : fnOutputs_) {
+                if (fo.isExtern) continue;
+                u64 fnOff = fnOffsets[fo.name];
+
+                for (auto& li : fo.lineInfos) {
+                    if (!li.loc.file) continue;
+                    u32 fIdx;
+                    std::string filename = li.loc.file;
+                    if (fileMap.count(filename)) {
+                        fIdx = fileMap[filename];
+                    } else {
+                        fIdx = lineProg.addFile(filename, 0);
+                        fileMap[filename] = fIdx;
+                    }
+
+                    DWARFLineEntry entry;
+                    entry.address = fnOff + li.offset;
+                    entry.line = li.loc.line;
+                    entry.column = li.loc.column;
+                    entry.fileIndex = fIdx;
+                    entry.isStmt = true;
+                    entry.basicBlock = false;
+                    entry.endSequence = false;
+                    lineProg.addEntry(entry);
+                }
+
+                DWARFLineEntry endEntry;
+                endEntry.address = fnOff + fnSizes[fo.name];
+                endEntry.endSequence = true;
+                lineProg.addEntry(endEntry);
+            }
+            elf.debugLineSection().data = lineProg.emit();
         }
 
         for (auto& go : globOutputs_) {

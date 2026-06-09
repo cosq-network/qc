@@ -11,6 +11,10 @@ enum class OutputKind { Object, Assembly, IR, CheckOnly };
 struct CompileOptions {
     std::vector<std::string> inputs;
     std::vector<std::string> includePaths;
+    std::vector<std::string> libPaths;       // -L
+    std::vector<std::string> libs;           // -l
+    std::vector<std::string> linkerArgs;     // -Wl,...
+    std::vector<std::string> linkerInputs;   // .o, .a files
     std::string              output;          // -o
     InputLang                lang     = InputLang::Auto;
     OutputKind               outKind  = OutputKind::Object;
@@ -20,6 +24,8 @@ struct CompileOptions {
     bool                     verbose  = false;
     bool                     dumpIR   = false;
     bool                     dumpAST  = false;
+    bool                     debug    = false; // -g
+    bool                     link     = true;  // whether to run linker
     int                      optLevel = 0;
 };
 
@@ -30,10 +36,12 @@ public:
     int run();
 
 private:
-    int compileFile(const std::string& path);
+    int compileFile(const std::string& path, std::string& outPath);
+    int invokeLinker();
 
     CompileOptions opts_;
     DiagEngine     diag_;
+    std::vector<std::string> tempFiles_;
 };
 
 int driverMain(int argc, char** argv);

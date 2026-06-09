@@ -279,4 +279,31 @@ std::string_view Token::spelling() const {
     return tokenKindName(kind);
 }
 
+// ===========================================================================
+// LEB128 encoding
+// ===========================================================================
+
+void encodeULEB128(std::vector<u8>& buf, u64 value) {
+    do {
+        u8 byte = value & 0x7F;
+        value >>= 7;
+        if (value != 0) byte |= 0x80;
+        buf.push_back(byte);
+    } while (value != 0);
+}
+
+void encodeSLEB128(std::vector<u8>& buf, i64 value) {
+    bool more = true;
+    do {
+        u8 byte = value & 0x7F;
+        value >>= 7;
+        if ((value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0)) {
+            more = false;
+        } else {
+            byte |= 0x80;
+        }
+        buf.push_back(byte);
+    } while (more);
+}
+
 } // namespace qc

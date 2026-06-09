@@ -6,6 +6,7 @@
 #include "qc/ir.h"
 #include "qc/elf_writer.h"
 #include "qc/pe_writer.h"
+#include "qc/dwarf.h"
 #include "qc/type.h"
 
 #include <cassert>
@@ -119,6 +120,11 @@ static bool typeIsFloat(const Type* t) {
 // ---------------------------------------------------------------------------
 // Per-function code-generation context
 // ---------------------------------------------------------------------------
+struct X64LineInfo {
+    u64 offset;
+    SourceLocation loc;
+};
+
 struct X64FuncCtx {
     // register allocation
     std::unordered_map<u64, u32> virToPhys;  // virtual reg → physical reg
@@ -129,13 +135,26 @@ struct X64FuncCtx {
 
     // assembly text lines for this function
     std::vector<std::string> lines;
+    std::vector<X64LineInfo> lineInfos;
+    u64                      currentOffset = 0;
+    SourceLocation           lastLoc;
 
     // current label for temp use
     std::string fnName;
 
-    void emit(std::string s) { lines.push_back(std::move(s)); }
-    void emitLabel(const std::string& l) { lines.push_back(l + ":"); }
-    void emitInst(const std::string& s)  { lines.push_back("    " + s); }
+    void setLoc(SourceLocation loc) {
+        if (loc.file && (loc.line != lastLoc.line || loc.file != lastLoc.file)) {
+            lineInfos.push_back({currentOffset, loc});
+            lastLoc = loc;
+        }
+    }
+
+    void emit(std::string s) {
+        currentOffset += s.length() + 1; // +1 for \n
+        lines.push_back(std::move(s));
+    }
+    void emitLabel(const std::string& l) { emit(l + ":"); }
+    void emitInst(const std::string& s)  { emit("    " + s); }
 };
 
 // ---------------------------------------------------------------------------
@@ -190,9 +209,14 @@ private:
     std::string spillStr(i32 off);
 
     // Saved output state
+    struct LineInfo {
+        u64 offset;
+        SourceLocation loc;
+    };
     struct FnOutput {
         std::string name;
         std::vector<std::string> lines;
+        std::vector<LineInfo> lineInfos;
         bool isExtern = false;
     };
     struct GlobOutput {
@@ -212,6 +236,10 @@ private:
 
     TargetInfo  target_;
     DiagEngine& diag_;
+    bool        debugEnabled_ = false;
+
+public:
+    void setDebugEnabled(bool e) override { debugEnabled_ = e; }
 };
 
 // ---------------------------------------------------------------------------
@@ -496,6 +524,11 @@ void X64CodeGen::compileFunction(const IRFunction& fn) {
     FnOutput fo;
     fo.name  = fn.name;
     fo.lines = std::move(ctx.lines);
+    if (debugEnabled_) {
+        for (const auto& li : ctx.lineInfos) {
+            fo.lineInfos.push_back({li.offset, li.loc});
+        }
+    }
     fnOutputs_.push_back(std::move(fo));
 }
 
@@ -503,6 +536,7 @@ void X64CodeGen::compileFunction(const IRFunction& fn) {
 // Instruction emission dispatch
 // ---------------------------------------------------------------------------
 void X64CodeGen::emitInstr(const IRInstr& ins, X64FuncCtx& ctx) {
+    if (debugEnabled_) ctx.setLoc(ins.loc);
     switch (ins.op) {
         case IROpcode::Alloca:    emitAlloca(ins, ctx); break;
         case IROpcode::Load:      emitLoad(ins, ctx);   break;
@@ -1517,6 +1551,92 @@ void X64CodeGen::emitAssembly(FILE* out) {
         }
         fprintf(out, "\n");
     }
+
+    // --- .debug_line ---
+    if (debugEnabled_) {
+        DWARFLineProgram lineProg;
+        std::unordered_map<std::string, u32> fileMap;
+        std::unordered_map<std::string, u64> fnOffsets;
+        std::unordered_map<std::string, u64> fnSizes;
+
+        u64 currentTextOff = 0;
+        for (auto& fo : fnOutputs_) {
+            if (fo.isExtern) continue;
+            fnOffsets[fo.name] = currentTextOff;
+            u64 size = 0;
+            for (auto& line : fo.lines) size += line.length() + 1;
+            fnSizes[fo.name] = size;
+            currentTextOff += size;
+        }
+
+        for (auto& fo : fnOutputs_) {
+            if (fo.isExtern) continue;
+            u64 fnOff = fnOffsets[fo.name];
+
+            for (auto& li : fo.lineInfos) {
+                if (!li.loc.file) continue;
+                u32 fIdx;
+                std::string filename = li.loc.file;
+                if (fileMap.count(filename)) {
+                    fIdx = fileMap[filename];
+                } else {
+                    fIdx = lineProg.addFile(filename, 0);
+                    fileMap[filename] = fIdx;
+                }
+
+                DWARFLineEntry entry;
+                entry.address = fnOff + li.offset;
+                entry.line = li.loc.line;
+                entry.column = li.loc.column;
+                entry.fileIndex = fIdx;
+                entry.isStmt = true;
+                entry.basicBlock = false;
+                entry.endSequence = false;
+                lineProg.addEntry(entry);
+            }
+
+            DWARFLineEntry endEntry;
+            endEntry.address = fnOff + fnSizes[fo.name];
+            endEntry.endSequence = true;
+            lineProg.addEntry(endEntry);
+        }
+
+        auto bytes = lineProg.emit();
+        fprintf(out, "\nsection .debug_line\n");
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            if (i % 16 == 0) fprintf(out, "\n    db ");
+            fprintf(out, "0x%02x%s", bytes[i], (i % 16 == 15 || i == bytes.size() - 1 ? "" : ","));
+        }
+        fprintf(out, "\n");
+
+        // --- .debug_info ---
+        DWARFDebugInfo info;
+        std::string cuName = "test.c";
+        for (auto& fo : fnOutputs_) {
+            if (!fo.lineInfos.empty() && fo.lineInfos[0].loc.file) {
+                cuName = fo.lineInfos[0].loc.file;
+                break;
+            }
+        }
+        info.addCU(cuName, "qc version 0.1.0", 0);
+        auto infoBytes = info.emit();
+        fprintf(out, "\nsection .debug_info\n");
+        for (size_t i = 0; i < infoBytes.size(); ++i) {
+            if (i % 16 == 0) fprintf(out, "\n    db ");
+            fprintf(out, "0x%02x%s", infoBytes[i], (i % 16 == 15 || i == infoBytes.size() - 1 ? "" : ","));
+        }
+        fprintf(out, "\n");
+
+        // --- .debug_abbrev ---
+        DWARFAbbrev abbrev;
+        auto abbrevBytes = abbrev.emit();
+        fprintf(out, "\nsection .debug_abbrev\n");
+        for (size_t i = 0; i < abbrevBytes.size(); ++i) {
+            if (i % 16 == 0) fprintf(out, "\n    db ");
+            fprintf(out, "0x%02x%s", abbrevBytes[i], (i % 16 == 15 || i == abbrevBytes.size() - 1 ? "" : ","));
+        }
+        fprintf(out, "\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1700,63 @@ std::vector<u8> X64CodeGen::emitObject() {
             sym.type         = STT_FUNC;
             sym.isExternal   = false;
             elf.addSymbol(sym);
+        }
+
+        // --- .debug_line ---
+        if (debugEnabled_) {
+            DWARFLineProgram lineProg;
+            std::unordered_map<std::string, u32> fileMap;
+
+            // Find the symbol index for the .text section so we can use it for relocations if needed
+            // But here we are using absolute offsets within the section.
+            
+            // Map function names to their offsets in .text for line table
+            std::unordered_map<std::string, u64> fnOffsets;
+            std::unordered_map<std::string, u64> fnSizes;
+            
+            u64 currentTextOff = 0;
+            for (auto& fo : fnOutputs_) {
+                if (fo.isExtern) continue;
+                fnOffsets[fo.name] = currentTextOff;
+                u64 size = 0;
+                for (auto& line : fo.lines) size += line.length() + 1;
+                fnSizes[fo.name] = size;
+                currentTextOff += size;
+            }
+
+            for (auto& fo : fnOutputs_) {
+                if (fo.isExtern) continue;
+                u64 fnOff = fnOffsets[fo.name];
+
+                for (auto& li : fo.lineInfos) {
+                    if (!li.loc.file) continue;
+                    u32 fIdx;
+                    std::string filename = li.loc.file;
+                    if (fileMap.count(filename)) {
+                        fIdx = fileMap[filename];
+                    } else {
+                        fIdx = lineProg.addFile(filename, 0);
+                        fileMap[filename] = fIdx;
+                    }
+
+                    DWARFLineEntry entry;
+                    entry.address = fnOff + li.offset;
+                    entry.line = li.loc.line;
+                    entry.column = li.loc.column;
+                    entry.fileIndex = fIdx;
+                    entry.isStmt = true;
+                    entry.basicBlock = false;
+                    entry.endSequence = false;
+                    lineProg.addEntry(entry);
+                }
+
+                // End sequence for this function
+                DWARFLineEntry endEntry;
+                endEntry.address = fnOff + fnSizes[fo.name];
+                endEntry.endSequence = true;
+                lineProg.addEntry(endEntry);
+            }
+            elf.debugLineSection().data = lineProg.emit();
         }
 
         // --- .data / .bss / .rodata for globals ---

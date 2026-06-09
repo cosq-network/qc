@@ -79,4 +79,8 @@ struct TargetInfo {
 
 TargetInfo parseTarget(std::string_view arch, std::string_view format);
 
+// LEB128 encoding
+void encodeULEB128(std::vector<u8>& buf, u64 value);
+void encodeSLEB128(std::vector<u8>& buf, i64 value);
+
 } // namespace qc

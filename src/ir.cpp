@@ -42,6 +42,9 @@ IRGlobal* IRModule::findGlobal(std::string_view n) {
 
 IRInstr& IRBuilder::emit(IRInstr instr) {
     assert(bb_ && "IRBuilder: no current block");
+    if (!instr.loc.file) {
+        instr.loc = loc_;
+    }
     bb_->instrs.push_back(std::move(instr));
     return bb_->instrs.back();
 }

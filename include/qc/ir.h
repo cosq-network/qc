@@ -80,6 +80,7 @@ struct IRInstr {
     std::string label; // for Br/CondBr targets
     std::string label2;
     u32         align = 0; // for Alloca/Load/Store
+    SourceLocation   loc;       // source location for debug info
 
     bool hasDst() const { return !dst.isVoid(); }
 };
@@ -150,8 +151,11 @@ public:
 
     void setFunction(IRFunction* fn) { fn_ = fn; bb_ = nullptr; }
     void setBlock(IRBlock* bb) { bb_ = bb; }
+    void setLoc(SourceLocation loc) { loc_ = loc; }
+
     IRBlock* block() const { return bb_; }
     IRFunction* function() const { return fn_; }
+    SourceLocation   loc() const { return loc_; }
 
     IRBlock* newBlock(std::string name = {});
 
@@ -184,6 +188,7 @@ private:
 
     IRFunction* fn_ = nullptr;
     IRBlock*    bb_ = nullptr;
+    SourceLocation   loc_;
 };
 
 void dumpModule(const IRModule& mod, FILE* out = stderr);

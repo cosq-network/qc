@@ -53,6 +53,7 @@ public:
     virtual void compile(const IRModule& mod)       = 0;
     virtual void emitAssembly(FILE* out)            = 0;
     virtual std::vector<u8> emitObject()            = 0;
+    virtual void setDebugEnabled(bool enabled)      = 0;
 
     static std::unique_ptr<CodeGen> create(const TargetInfo& target,
                                            DiagEngine& diag);

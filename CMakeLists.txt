@@ -56,6 +56,7 @@ set(QC_SOURCES
   src/codegen/arm64_codegen.cpp
   src/format/elf_writer.cpp
   src/format/pe_writer.cpp
+  src/format/dwarf.cpp
 )
 
 add_executable(qc ${QC_SOURCES})

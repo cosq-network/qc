@@ -6,6 +6,8 @@
 #include <cassert>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cstring>
 
 namespace qc {
 
@@ -70,6 +72,22 @@ void IRGen::genVarDecl(const VarDecl* d) {
         g.isExtern  = d->isExtern;
         g.isZeroInit = (!d->init);
         g.align     = d->alignment;
+
+        if (d->init) {
+            if (d->init->kind() == ExprKind::IntLit) {
+                auto* il = static_cast<const IntLitExpr*>(d->init.get());
+                u64 val = il->value;
+                u32 sz = d->type ? (u32)d->type->size() : 4;
+                g.initData.resize(sz, 0);
+                std::memcpy(g.initData.data(), &val, std::min((u32)8, sz));
+                if (val == 0) g.isZeroInit = true;
+            } else if (d->init->kind() == ExprKind::StringLit) {
+                auto* sl = static_cast<const StringLitExpr*>(d->init.get());
+                g.stringInit = sl->value;
+                g.hasStringInit = true;
+            }
+        }
+
         mod_.globals.push_back(std::move(g));
         return;
     }
@@ -96,6 +114,7 @@ void IRGen::genVarDecl(const VarDecl* d) {
 
 void IRGen::genFuncDecl(const FuncDecl* d) {
     if (!d) return;
+    builder_.setLoc(d->loc);
 
     // Create or find function record.
     IRFunction fn;
@@ -179,6 +198,7 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
 
 void IRGen::genStmt(const Stmt* s) {
     if (!s) return;
+    builder_.setLoc(s->loc);
     switch (s->kind()) {
         case StmtKind::Compound:
             genCompoundStmt(static_cast<const CompoundStmt*>(s));
@@ -552,6 +572,7 @@ void IRGen::genLabelStmt(const LabelStmt* s) {
 
 IRValue IRGen::genExpr(const Expr* e) {
     if (!e) return IRValue::voidVal();
+    builder_.setLoc(e->loc);
     switch (e->kind()) {
         case ExprKind::IntLit:    return genIntLit(static_cast<const IntLitExpr*>(e));
         case ExprKind::FloatLit:  return genFloatLit(static_cast<const FloatLitExpr*>(e));

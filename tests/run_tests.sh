@@ -6,7 +6,7 @@ for f in *.c; do
   if [[ "$f" == "test_stdqc_c.c" ]]; then continue; fi
   if [[ "$f" == *"fail"* ]]; then
     echo "Testing $f (expecting failure)..."
-    $QC "$f" -o "${f%.c}.o" > /dev/null 2>&1
+    $QC "$f" -o "${f%.c}.exe" > /dev/null 2>&1
     if [ $? -eq 0 ]; then
       echo "ERROR: $f passed but should have failed!"
       FAILED=$((FAILED + 1))
@@ -15,12 +15,18 @@ for f in *.c; do
     fi
   else
     echo "Testing $f..."
-    $QC "$f" -o "${f%.c}.o"
+    $QC "$f" -o "${f%.c}.exe"
     if [ $? -ne 0 ]; then
-      echo "ERROR: $f failed to compile!"
+      echo "ERROR: $f failed to compile/link!"
       FAILED=$((FAILED + 1))
     else
-      echo "SUCCESS: $f compiled."
+      ./"${f%.c}.exe"
+      if [ $? -ne 0 ] && [[ "$f" != "hello.c" ]]; then
+        echo "ERROR: $f failed to run correctly!"
+        FAILED=$((FAILED + 1))
+      else
+        echo "SUCCESS: $f compiled and ran."
+      fi
     fi
   fi
 done
@@ -32,23 +38,23 @@ else
 fi
 
 echo "------------------------------------------------"
-echo "Verifying stdqc library..."
+echo "Verifying stdqc library with qc..."
 echo "------------------------------------------------"
 
 STDQC_FAILED=0
 
-# Verify C library
-gcc -ffreestanding -I../stdqc/include/c test_stdqc_c.c ../build/stdqc/libstdqc.a -o test_stdqc_c
+# Verify C library using qc as driver
+$QC -I../stdqc/include/c test_stdqc_c.c ../build/stdqc/libstdqc.a -o test_stdqc_c_qc
 if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to compile stdqc C test"
+    echo "ERROR: Failed to compile/link stdqc C test with qc"
     STDQC_FAILED=$((STDQC_FAILED + 1))
 else
-    ./test_stdqc_c
+    ./test_stdqc_c_qc
     if [ $? -ne 0 ]; then
         echo "ERROR: stdqc C test failed to run"
         STDQC_FAILED=$((STDQC_FAILED + 1))
     else
-        echo "SUCCESS: stdqc C test passed."
+        echo "SUCCESS: stdqc C test passed (via qc)."
     fi
 fi
 

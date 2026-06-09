@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstdlib>
+#include <sstream>
 
 namespace qc {
 
@@ -35,16 +37,107 @@ int Driver::run() {
         return 1;
     }
 
+    if (opts_.link) {
+        // When linking, we'll emit assembly to temp files and let 'cc' handle assembly and linking.
+        // This ensures we get real machine code even though our ELFWriter is currently a prototype.
+        std::vector<std::string> assemblyFiles;
+        int result = 0;
+        for (const auto& path : opts_.inputs) {
+            // Force assembly output kind for the internal compilation
+            OutputKind oldKind = opts_.outKind;
+            opts_.outKind = OutputKind::Assembly;
+            
+            std::string out;
+            int r = compileFile(path, out);
+            opts_.outKind = oldKind; // restore
+
+            if (r != 0) {
+                result = r;
+            } else {
+                assemblyFiles.push_back(out);
+            }
+        }
+
+        if (result == 0 && !assemblyFiles.empty()) {
+            tempFiles_ = std::move(assemblyFiles);
+            result = invokeLinker();
+        }
+        return result;
+    }
+
+    // Standard compile-only path
+    std::vector<std::string> objectFiles;
     int result = 0;
     for (const auto& path : opts_.inputs) {
-        int r = compileFile(path);
-        if (r != 0) result = r;
+        std::string out;
+        int r = compileFile(path, out);
+        if (r != 0) {
+            result = r;
+        } else if (!out.empty() && opts_.outKind == OutputKind::Object) {
+            objectFiles.push_back(out);
+        }
     }
     return result;
 }
 
-// ---------------------------------------------------------------------------
-// Determine output path
+int Driver::invokeLinker() {
+    std::stringstream ss;
+    ss << "cc"; // Use cc as the linker driver
+
+    // Output file
+    std::string outPath = opts_.output.empty() ? "a.out" : opts_.output;
+    ss << " -o " << outPath;
+
+    // Object files
+    for (const auto& obj : tempFiles_) {
+        ss << " " << obj;
+    }
+
+    // Library paths
+    for (const auto& path : opts_.libPaths) {
+        ss << " -L" << path;
+    }
+
+    // Libraries
+    for (const auto& lib : opts_.libs) {
+        ss << " -l" << lib;
+    }
+
+    // Linker inputs (objects, libraries)
+    for (const auto& in : opts_.linkerInputs) {
+        ss << " " << in;
+    }
+
+    // Linker args
+    for (const auto& arg : opts_.linkerArgs) {
+        ss << " -Wl," << arg;
+    }
+
+    // Freestanding / No standard libs if requested? 
+    // For now we assume we WANT system libs unless specified.
+    // But we definitely want stdqc if it's there.
+    
+    // Attempt to link against libstdqc if we can find it
+    // ss << " -lstdqc"; 
+
+    // Debug info
+    if (opts_.debug) {
+        ss << " -g";
+    }
+
+    std::string cmd = ss.str();
+    if (opts_.verbose) {
+        std::fprintf(stderr, "qc: linking: %s\n", cmd.c_str());
+    }
+
+    int exitCode = std::system(cmd.c_str());
+    if (exitCode != 0) {
+        std::fprintf(stderr, "qc: error: linker failed with exit code %d\n", exitCode);
+        return 1;
+    }
+
+    return 0;
+}
 // ---------------------------------------------------------------------------
 static std::string deriveOutputPath(const std::string& input, OutputKind kind) {
     // Strip trailing extension, then append the appropriate one
@@ -103,7 +196,7 @@ static bool writeFile(const std::string& path, const std::vector<u8>& bytes) {
 // ---------------------------------------------------------------------------
 // compileFile
 // ---------------------------------------------------------------------------
-int Driver::compileFile(const std::string& path) {
+int Driver::compileFile(const std::string& path, std::string& outPath) {
     if (opts_.verbose) {
         std::fprintf(stderr, "qc: compiling '%s'\n", path.c_str());
     }
@@ -201,7 +294,7 @@ int Driver::compileFile(const std::string& path) {
 
     // 11. IR output mode
     if (opts_.outKind == OutputKind::IR) {
-        std::string outPath = opts_.output.empty()
+        outPath = opts_.output.empty()
                               ? deriveOutputPath(path, OutputKind::IR)
                               : opts_.output;
         // dumpModule writes to a FILE*; open the file and write IR text
@@ -221,6 +314,9 @@ int Driver::compileFile(const std::string& path) {
         std::fprintf(stderr, "qc: error: unsupported target\n");
         return 1;
     }
+    if (opts_.debug) {
+        codegen->setDebugEnabled(true);
+    }
     codegen->compile(mod);
 
     if (diag.hasError()) {
@@ -229,7 +325,7 @@ int Driver::compileFile(const std::string& path) {
 
     // 13. Assembly output mode
     if (opts_.outKind == OutputKind::Assembly) {
-        std::string outPath = opts_.output.empty()
+        outPath = (opts_.output.empty() || opts_.link)
                               ? deriveOutputPath(path, OutputKind::Assembly)
                               : opts_.output;
         FILE* f = std::fopen(outPath.c_str(), "w");
@@ -245,7 +341,7 @@ int Driver::compileFile(const std::string& path) {
     // 14. Object file output
     auto bytes = codegen->emitObject();
 
-    std::string outPath = opts_.output.empty()
+    outPath = (opts_.output.empty() || opts_.link)
                           ? deriveOutputPath(path, OutputKind::Object)
                           : opts_.output;
 
@@ -266,6 +362,11 @@ static void printUsage(const char* prog) {
         "Options:\n"
         "  -o <file>        Write output to <file>\n"
         "  -I <dir>         Add <dir> to include search path\n"
+        "  -L <dir>         Add <dir> to library search path\n"
+        "  -l <lib>         Link with <lib>\n"
+        "  -Wl,<arg>        Pass <arg> to the linker\n"
+        "  -c               Compile only, do not link\n"
+        "  -g               Generate debug information\n"
         "  -S               Output assembly instead of object code\n"
         "  -emit-ir         Output IR text (.ll)\n"
         "  -fsyntax-only    Only run syntax and semantic checks\n"
@@ -284,6 +385,25 @@ static void printUsage(const char* prog) {
 
 int driverMain(int argc, char** argv) {
     CompileOptions opts;
+#ifdef QC_DEFAULT_ARCH
+    std::string defArch = QC_DEFAULT_ARCH;
+    if (defArch == "arm64") opts.arch = TargetArch::ARM64;
+    else opts.arch = TargetArch::X64;
+#endif
+#ifdef QC_DEFAULT_FORMAT
+    std::string defFmt = QC_DEFAULT_FORMAT;
+    if (defFmt == "pe") {
+        opts.format = TargetFormat::PE;
+        opts.os     = TargetOS::Windows;
+    } else {
+        opts.format = TargetFormat::ELF;
+#ifdef __APPLE__
+        opts.os     = TargetOS::MacOS;
+#else
+        opts.os     = TargetOS::Linux;
+#endif
+    }
+#endif
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -305,12 +425,37 @@ int driverMain(int argc, char** argv) {
             opts.includePaths.push_back(argv[++i]);
         } else if (arg.size() > 2 && arg.substr(0, 2) == "-I") {
             opts.includePaths.push_back(arg.substr(2));
+        } else if (arg == "-L") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "qc: error: -L requires an argument\n");
+                return 1;
+            }
+            opts.libPaths.push_back(argv[++i]);
+        } else if (arg.size() > 2 && arg.substr(0, 2) == "-L") {
+            opts.libPaths.push_back(arg.substr(2));
+        } else if (arg == "-l") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "qc: error: -l requires an argument\n");
+                return 1;
+            }
+            opts.libs.push_back(argv[++i]);
+        } else if (arg.size() > 2 && arg.substr(0, 2) == "-l") {
+            opts.libs.push_back(arg.substr(2));
+        } else if (arg.size() > 4 && arg.substr(0, 4) == "-Wl,") {
+            opts.linkerArgs.push_back(arg.substr(4));
+        } else if (arg == "-c") {
+            opts.link = false;
+        } else if (arg == "-g") {
+            opts.debug = true;
         } else if (arg == "-S") {
             opts.outKind = OutputKind::Assembly;
+            opts.link = false;
         } else if (arg == "-emit-ir" || arg == "--emit-ir") {
             opts.outKind = OutputKind::IR;
+            opts.link = false;
         } else if (arg == "-fsyntax-only") {
             opts.outKind = OutputKind::CheckOnly;
+            opts.link = false;
         } else if (arg == "-arch=x64" || arg == "-march=x86-64") {
             opts.arch = TargetArch::X64;
         } else if (arg == "-arch=arm64" || arg == "-march=aarch64") {
@@ -356,8 +501,20 @@ int driverMain(int argc, char** argv) {
                 opts.optLevel = arg[2] - '0';
             }
         } else if (!arg.empty() && arg[0] != '-') {
-            // Input file
-            opts.inputs.push_back(arg);
+            // Input file: check extension to see if it's a source file or a linker input
+            auto dot = arg.rfind('.');
+            bool isSource = false;
+            if (dot != std::string::npos) {
+                std::string ext = arg.substr(dot + 1);
+                if (ext == "c" || ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "i" || ext == "ii") {
+                    isSource = true;
+                }
+            }
+            if (isSource) {
+                opts.inputs.push_back(arg);
+            } else {
+                opts.linkerInputs.push_back(arg);
+            }
         } else {
             std::fprintf(stderr, "qc: warning: unrecognized option '%s'\n", arg.c_str());
         }
