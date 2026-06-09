@@ -33,9 +33,9 @@ Token Preprocessor::lexRaw() {
 }
 
 Token Preprocessor::next() {
-    if (putBack_.has_value()) {
-        Token t = std::move(*putBack_);
-        putBack_.reset();
+    if (!putBackStack_.empty()) {
+        Token t = std::move(putBackStack_.back());
+        putBackStack_.pop_back();
         return t;
     }
 
@@ -70,15 +70,14 @@ Token Preprocessor::next() {
 }
 
 Token Preprocessor::peek() {
-    if (!putBack_.has_value()) {
-        putBack_ = next();
+    if (putBackStack_.empty()) {
+        putBackStack_.push_back(next());
     }
-    return *putBack_;
+    return putBackStack_.back();
 }
 
 void Preprocessor::putBack(Token tok) {
-    assert(!putBack_.has_value() && "putBack called with token already buffered");
-    putBack_ = std::move(tok);
+    putBackStack_.push_back(std::move(tok));
 }
 
 void Preprocessor::skipLine(u32 line) {

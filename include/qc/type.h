@@ -51,6 +51,7 @@ public:
 
     bool isVoid()     const { return kind() == TypeKind::Void; }
     bool isInteger()  const;
+    bool isSigned()   const;
     bool isFloat()    const;
     bool isPointer()  const { return kind() == TypeKind::Pointer; }
     bool isArray()    const { return kind() == TypeKind::Array || kind() == TypeKind::IncompleteArray; }
@@ -128,6 +129,7 @@ public:
     std::string toString() const override;
 
     Type* returnType() const { return ret_.get(); }
+    TypePtr returnTypePtr() const { return ret_; }
     const std::vector<ParamInfo>& params() const { return params_; }
     bool  isVariadic() const { return variadic_; }
 
@@ -145,6 +147,15 @@ struct FieldInfo {
     i32         bitWidth = -1; // -1 = not a bitfield
 };
 
+struct MethodInfo {
+    std::string name;
+    TypePtr     type; // FunctionType
+    class RecordType* parent = nullptr;
+    bool        isStatic = false;
+    bool        isConstructor = false;
+    bool        isDestructor = false;
+};
+
 class RecordType : public Type {
 public:
     RecordType(TypeKind k, std::string name)
@@ -157,16 +168,23 @@ public:
 
     const std::string& name() const { return name_; }
     const std::vector<FieldInfo>& fields() const { return fields_; }
+    const std::vector<MethodInfo>& methods() const { return methods_; }
     bool isComplete() const { return complete_; }
 
     void addField(FieldInfo f);
+    void addMethod(MethodInfo m);
     void finalize();
     int  fieldIndex(std::string_view name) const;
+    int  methodIndex(std::string_view name) const;
+
+    const MethodInfo* findConstructor(const std::vector<TypePtr>& argTypes) const;
+    const MethodInfo* findDestructor() const;
 
 private:
     TypeKind            kind_;
     std::string         name_;
     std::vector<FieldInfo> fields_;
+    std::vector<MethodInfo> methods_;
     u32                 size_   = 0;
     u32                 align_  = 1;
     bool                complete_ = false;

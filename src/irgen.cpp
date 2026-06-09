@@ -26,11 +26,13 @@ IRGen::IRGen(TypeContext& types, DiagEngine& diag, const TargetInfo& target)
 // ============================================================
 
 IRModule IRGen::generate(const TranslationUnit& tu) {
+    std::fprintf(stderr, "qc: IRGen::generate starting\n");
     for (auto& d : tu.decls) {
-        genDecl(d.get());
+        if (d) genDecl(d.get());
     }
     return std::move(mod_);
 }
+
 
 // ============================================================
 // Declarations
@@ -56,12 +58,15 @@ void IRGen::genDecl(const Decl* d) {
     }
 }
 
-void IRGen::genRecordDecl(const RecordDecl* /*d*/) {
-    // Record types are handled at the type level; no IR to emit.
+void IRGen::genRecordDecl(const RecordDecl* d) {
+    if (!d) return;
+    for (auto& mem : d->members) {
+        genDecl(mem.get());
+    }
 }
 
 void IRGen::genVarDecl(const VarDecl* d) {
-    if (!d) return;
+    if (!d || d->isField) return;
 
     if (d->isGlobal || d->isStatic) {
         // Emit a global variable.
@@ -105,6 +110,27 @@ void IRGen::genVarDecl(const VarDecl* d) {
     }
     varMap_[d] = ptr;
 
+    // Constructor call
+    if (d->constructor) {
+        std::vector<IRValue> args;
+        args.push_back(ptr); // this
+        for (auto& arg : d->args) {
+            args.push_back(genExpr(arg.get()));
+        }
+        
+        std::string mangledName = mangleMethod(d->constructor->parent, d->constructor);
+        IRValue callee = IRValue::global(types_.ptrTo(d->constructor->type), mangledName);
+        builder_.call(types_.voidTy(), callee, std::move(args));
+    }
+
+    // Destructor registration
+    if (d->destructor && !cleanupStack_.empty()) {
+        Cleanup c;
+        c.destructor = d->destructor;
+        c.thisPtr    = ptr;
+        cleanupStack_.back().push_back(c);
+    }
+
     if (d->init) {
         IRValue val = genExpr(d->init.get());
         if (d->type) val = coerce(val, val.type ? val.type.get() : nullptr, d->type.get());
@@ -112,13 +138,34 @@ void IRGen::genVarDecl(const VarDecl* d) {
     }
 }
 
+std::string IRGen::mangle(const FuncDecl* d) {
+    std::string name = d->name;
+    if (d->isDestructor) {
+        name = "destructor";
+    }
+    if (!d->parentRecordType) return name;
+    return d->parentRecordType->name() + "_" + name;
+}
+
+std::string IRGen::mangleMethod(const RecordType* parent, const MethodInfo* method) {
+    std::string name = method->name;
+    if (method->isDestructor) name = "destructor";
+    return parent->name() + "_" + name;
+}
+
 void IRGen::genFuncDecl(const FuncDecl* d) {
     if (!d) return;
+
+    // Reset function-specific state
+    varMap_.clear();
+    labelMap_.clear();
+    thisAlloca_ = IRValue::voidVal();
+
     builder_.setLoc(d->loc);
 
     // Create or find function record.
     IRFunction fn;
-    fn.name    = d->name;
+    fn.name    = mangle(d);
     fn.retType = types_.voidTy(); // default
     if (d->type && d->type->isFunction()) {
         auto* ft = static_cast<FunctionType*>(d->type.get());
@@ -131,6 +178,19 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
 
     // Build param list.
     u64 pReg = 0;
+    if (d->parentRecordType && !d->isStatic) {
+        // Only inject if not already in d->params (Sema might have injected it)
+        bool hasThis = !d->params.empty() && d->params[0]->name == "this";
+        if (!hasThis) {
+            IRParam param;
+            param.name = "this";
+            param.type = types_.ptrTo(d->parentRecordType);
+            param.reg  = pReg++;
+            fn.params.push_back(param);
+            fn.nextReg = pReg;
+        }
+    }
+
     for (auto& p : d->params) {
         IRParam param;
         param.name = p->name;
@@ -155,12 +215,22 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
     IRBlock* entry = irfn->addBlock("entry");
     builder_.setBlock(entry);
 
+    pushScope();
+
     // Make sure nextReg is past all param registers.
     if (irfn->nextReg < (u64)irfn->params.size()) {
         irfn->nextReg = (u64)irfn->params.size();
     }
 
     // For each parameter, create an alloca + store so the param is addressable.
+    if (d->parentRecordType && !d->isStatic) {
+        TypePtr recTy = d->parentRecordType;
+        TypePtr thisTy = types_.ptrTo(recTy);
+        thisAlloca_ = builder_.makeAlloca(thisTy, "this");
+        // thisAlloca_.type is Counter**
+        builder_.store(IRValue::reg(thisTy, 0), thisAlloca_);
+    }
+
     for (auto& p : d->params) {
         // Find corresponding IRParam.
         IRParam* irp = nullptr;
@@ -182,14 +252,36 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
 
     // Add implicit ret void if no terminator.
     if (!builder_.hasTerminator()) {
+        emitPopScope();
         builder_.ret();
     }
+
+    popScope(); // Actually we should probably just clear it, as we've emitted cleanups
+    cleanupStack_.clear();
 
     curFn_ = nullptr;
     varMap_.clear();
     labelMap_.clear();
     loopStack_.clear();
     switchBreaks_.clear();
+}
+
+void IRGen::popScope() {
+    emitPopScope();
+    cleanupStack_.pop_back();
+}
+
+void IRGen::emitPopScope() {
+    if (cleanupStack_.empty()) return;
+    auto& cleanups = cleanupStack_.back();
+    // Destructors called in reverse order of construction
+    for (int i = (int)cleanups.size() - 1; i >= 0; --i) {
+        auto& c = cleanups[i];
+        // Call destructor
+        std::string mangledName = mangleMethod(c.destructor->parent, c.destructor);
+        IRValue callee = IRValue::global(types_.ptrTo(c.destructor->type), mangledName);
+        builder_.call(types_.voidTy(), callee, { c.thisPtr });
+    }
 }
 
 // ============================================================
@@ -261,13 +353,11 @@ void IRGen::genStmt(const Stmt* s) {
 
 void IRGen::genCompoundStmt(const CompoundStmt* s) {
     if (!s) return;
+    pushScope();
     for (auto& child : s->stmts) {
         genStmt(child.get());
-        // If we've hit a terminator (e.g., return/break inside block),
-        // subsequent unreachable code can be skipped by checking hasTerminator.
-        // We still generate it so labels/decls are processed, but real codegen
-        // would normally stop. For correctness we continue.
     }
+    popScope();
 }
 
 void IRGen::genIfStmt(const IfStmt* s) {
@@ -501,17 +591,30 @@ void IRGen::genSwitchStmt(const SwitchStmt* s) {
 
 void IRGen::genReturnStmt(const ReturnStmt* s) {
     if (!s) return;
+    IRValue retVal;
     if (s->value) {
-        IRValue val = genExpr(s->value.get());
+        retVal = genExpr(s->value.get());
         // Coerce to function return type if needed.
-        if (curFn_ && curFn_->retType && val.type) {
-            val = coerce(val, val.type.get(), curFn_->retType.get());
+        if (curFn_ && curFn_->retType && retVal.type) {
+            retVal = coerce(retVal, retVal.type.get(), curFn_->retType.get());
         }
-        builder_.ret(val);
-    } else {
-        builder_.ret();
     }
+
+    // Emit all cleanups
+    for (int i = (int)cleanupStack_.size() - 1; i >= 0; --i) {
+        auto& cleanups = cleanupStack_[i];
+        for (int j = (int)cleanups.size() - 1; j >= 0; --j) {
+            auto& c = cleanups[j];
+            std::string mangledName = mangleMethod(c.destructor->parent, c.destructor);
+            IRValue callee = IRValue::global(types_.ptrTo(c.destructor->type), mangledName);
+            builder_.call(types_.voidTy(), callee, { c.thisPtr });
+        }
+    }
+
+    if (s->value) builder_.ret(retVal);
+    else          builder_.ret();
 }
+
 
 void IRGen::genBreakStmt() {
     // Break exits the innermost loop or switch. When both are present,
@@ -617,12 +720,23 @@ IRValue IRGen::genLValue(const Expr* e) {
     switch (e->kind()) {
         case ExprKind::Ident: {
             auto* ie = static_cast<const IdentExpr*>(e);
+            if (ie->isImplicitThis && ie->field) {
+                TypePtr thisPtrTy = thisAlloca_.type;
+                TypePtr thisTy = std::shared_ptr<Type>(thisPtrTy, static_cast<PointerType*>(thisPtrTy.get())->pointee());
+                IRValue thisVal = builder_.load(thisTy, thisAlloca_);
+                TypePtr fieldTy = ie->field->type;
+                IRValue offset = IRValue::constant(types_.intTy(), (u64)ie->field->offset);
+                return builder_.gep(fieldTy, thisVal, { offset });
+            }
             if (ie->decl) {
                 auto it = varMap_.find(ie->decl);
                 if (it != varMap_.end()) return it->second;
                 // Global: return global value.
                 IRGlobal* g = mod_.findGlobal(ie->name);
-                if (g) return IRValue::global(g->type ? g->type : types_.ptrTo(types_.voidTy()), g->name);
+                if (g) {
+                    TypePtr ptrTy = types_.ptrTo(g->type ? g->type : types_.intTy());
+                    return IRValue::global(ptrTy, g->name);
+                }
             }
             return IRValue::voidVal();
         }
@@ -699,6 +813,20 @@ IRValue IRGen::genStringLit(const StringLitExpr* e) {
 
 IRValue IRGen::genIdent(const IdentExpr* e) {
     if (!e) return IRValue::voidVal();
+
+    if (e->name == "this") {
+        return builder_.load(e->type, thisAlloca_);
+    }
+
+    if (e->isImplicitThis && e->field) {
+        TypePtr thisPtrTy = thisAlloca_.type;
+        TypePtr thisTy = std::shared_ptr<Type>(thisPtrTy, static_cast<PointerType*>(thisPtrTy.get())->pointee());
+        IRValue thisVal = builder_.load(thisTy, thisAlloca_);
+        TypePtr fieldTy = e->field->type;
+        IRValue offset = IRValue::constant(types_.intTy(), (u64)e->field->offset);
+        IRValue fieldPtr = builder_.gep(fieldTy, thisVal, { offset });
+        return builder_.load(fieldTy, fieldPtr);
+    }
 
     // Try local variable map.
     if (e->decl) {
@@ -938,6 +1066,28 @@ IRValue IRGen::genTernary(const TernaryExpr* e) {
 IRValue IRGen::genCall(const CallExpr* e) {
     if (!e) return IRValue::voidVal();
 
+    // Member call: obj.method() or ptr->method()
+    if (e->callee && e->callee->kind() == ExprKind::Member) {
+        auto* me = static_cast<const MemberExpr*>(e->callee.get());
+        if (me->method) {
+            IRValue basePtr;
+            if (me->isArrow) basePtr = genExpr(me->base.get());
+            else             basePtr = genLValue(me->base.get());
+            return genMemberCall(e, basePtr, me->method);
+        }
+    }
+
+    // Implicit member call: method()
+    if (e->callee && e->callee->kind() == ExprKind::Ident) {
+        auto* ie = static_cast<const IdentExpr*>(e->callee.get());
+        if (ie->isImplicitThis && ie->method) {
+            TypePtr thisPtrTy = thisAlloca_.type;
+            TypePtr thisTy = std::shared_ptr<Type>(thisPtrTy, static_cast<PointerType*>(thisPtrTy.get())->pointee());
+            IRValue thisVal = builder_.load(thisTy, thisAlloca_);
+            return genMemberCall(e, thisVal, ie->method);
+        }
+    }
+
     IRValue callee = genExpr(e->callee.get());
     TypePtr retTy = e->type ? e->type : types_.voidTy();
 
@@ -956,6 +1106,27 @@ IRValue IRGen::genCall(const CallExpr* e) {
     return builder_.call(retTy, callee, std::move(args));
 }
 
+IRValue IRGen::genMemberCall(const CallExpr* e, IRValue basePtr, const MethodInfo* method) {
+    // Simple mangling: ClassName_MethodName
+    std::string mangledName = method->parent->name() + "_" + method->name;
+    
+    TypePtr retTy = types_.voidTy();
+    if (method->type && method->type->kind() == TypeKind::Function) {
+        retTy = std::shared_ptr<Type>(method->type, static_cast<FunctionType*>(method->type.get())->returnType());
+    }
+    
+    std::vector<IRValue> args;
+    if (!method->isStatic) {
+        args.push_back(basePtr);
+    }
+    for (auto& arg : e->args) {
+        args.push_back(genExpr(arg.get()));
+    }
+    
+    IRValue callee = IRValue::global(types_.ptrTo(method->type), mangledName);
+    return builder_.call(retTy, callee, std::move(args));
+}
+
 IRValue IRGen::genMember(const MemberExpr* e) {
     if (!e) return IRValue::voidVal();
 
@@ -966,13 +1137,19 @@ IRValue IRGen::genMember(const MemberExpr* e) {
         basePtr = genLValue(e->base.get());
     }
 
-    if (!e->field || basePtr.isVoid()) return IRValue::voidVal();
+    if (e->field) {
+        TypePtr fieldTy = e->field->type ? e->field->type : types_.intTy();
+        TypePtr i32Ty   = types_.intTy();
+        IRValue offset  = IRValue::constant(i32Ty, (u64)e->field->offset);
+        IRValue ptr     = builder_.gep(fieldTy, basePtr, { offset });
+        return builder_.load(fieldTy, ptr);
+    }
+    
+    if (e->method) {
+        return basePtr; // proxy
+    }
 
-    TypePtr fieldTy = e->field->type ? e->field->type : types_.intTy();
-    TypePtr i32Ty   = types_.intTy();
-    IRValue offset  = IRValue::constant(i32Ty, (u64)e->field->offset);
-    IRValue ptr     = builder_.gep(fieldTy, basePtr, { offset });
-    return builder_.load(fieldTy, ptr);
+    return IRValue::voidVal();
 }
 
 IRValue IRGen::genIndex(const IndexExpr* e) {
@@ -1183,9 +1360,13 @@ IROpcode IRGen::selectBinOp(BinaryOp op, Type* ty) {
         case BinaryOp::Add: return isFloat ? IROpcode::FAdd : IROpcode::Add;
         case BinaryOp::Sub: return isFloat ? IROpcode::FSub : IROpcode::Sub;
         case BinaryOp::Mul: return isFloat ? IROpcode::FMul : IROpcode::Mul;
-        case BinaryOp::Div: return isFloat ? IROpcode::FDiv : IROpcode::Div;
-        case BinaryOp::Mod: return IROpcode::Mod;
+        case BinaryOp::Div: 
+            if (isFloat) return IROpcode::FDiv;
+            return isUnsigned ? IROpcode::UDiv : IROpcode::Div;
+        case BinaryOp::Mod: 
+            return isUnsigned ? IROpcode::UMod : IROpcode::Mod;
         case BinaryOp::And: return IROpcode::And;
+
         case BinaryOp::Or:  return IROpcode::Or;
         case BinaryOp::Xor: return IROpcode::Xor;
         case BinaryOp::Shl: return IROpcode::Shl;

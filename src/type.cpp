@@ -23,6 +23,20 @@ bool Type::isInteger() const {
     }
 }
 
+bool Type::isSigned() const {
+    switch (kind()) {
+    case TypeKind::Char: case TypeKind::SChar:
+    case TypeKind::Short:
+    case TypeKind::Int:
+    case TypeKind::Long:
+    case TypeKind::LongLong:
+    case TypeKind::Enum:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool Type::isFloat() const {
     switch (kind()) {
     case TypeKind::Float: case TypeKind::Double: case TypeKind::LongDouble:
@@ -170,6 +184,11 @@ void RecordType::addField(FieldInfo f) {
     fields_.push_back(std::move(f));
 }
 
+void RecordType::addMethod(MethodInfo m) {
+    m.parent = this;
+    methods_.push_back(std::move(m));
+}
+
 void RecordType::finalize() {
     if (kind_ == TypeKind::Union) {
         // Union size = max field size
@@ -188,12 +207,38 @@ void RecordType::finalize() {
 }
 
 int RecordType::fieldIndex(std::string_view name) const {
-    for (int i = 0; i < (int)fields_.size(); ++i) {
-        if (fields_[i].name == name) {
-            return i;
-        }
+    for (size_t i = 0; i < fields_.size(); ++i) {
+        if (fields_[i].name == name) return (int)i;
     }
     return -1;
+}
+
+int RecordType::methodIndex(std::string_view name) const {
+    for (size_t i = 0; i < methods_.size(); ++i) {
+        if (methods_[i].name == name) return (int)i;
+    }
+    return -1;
+}
+
+const MethodInfo* RecordType::findConstructor(const std::vector<TypePtr>& argTypes) const {
+    for (const auto& m : methods_) {
+        if (!m.isConstructor) continue;
+        if (!m.type || m.type->kind() != TypeKind::Function) continue;
+
+        auto* ft = static_cast<FunctionType*>(m.type.get());
+        if (ft->params().size() == argTypes.size()) {
+            // Simple match for now: number of arguments
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+const MethodInfo* RecordType::findDestructor() const {
+    for (const auto& m : methods_) {
+        if (m.isDestructor) return &m;
+    }
+    return nullptr;
 }
 
 // ============================================================

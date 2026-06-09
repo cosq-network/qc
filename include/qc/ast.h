@@ -68,9 +68,15 @@ struct NullptrLitExpr : Expr {
     ExprKind kind() const override { return ExprKind::NullptrLit; }
 };
 
+struct FieldInfo;
+struct MethodInfo;
+
 struct IdentExpr : Expr {
     std::string name;
     Decl*       decl = nullptr; // resolved by sema
+    FieldInfo*  field = nullptr; // for implicit member access
+    MethodInfo* method = nullptr;
+    bool        isImplicitThis = false;
     ExprKind kind() const override { return ExprKind::Ident; }
 };
 
@@ -121,6 +127,7 @@ struct MemberExpr : Expr {
     std::string member;
     bool        isArrow; // -> vs .
     FieldInfo*  field = nullptr; // resolved by sema
+    MethodInfo* method = nullptr; // resolved by sema
     ExprKind kind() const override { return ExprKind::Member; }
 };
 
@@ -336,7 +343,11 @@ public:
 
 struct VarDecl : Decl {
     ExprPtr  init;    // may be null
+    std::vector<ExprPtr> args; // for constructor-style initialization: Foo f(1, 2)
+    const MethodInfo* constructor = nullptr; // resolved by sema
+    const MethodInfo* destructor  = nullptr; // resolved by sema
     bool     isGlobal = false;
+    bool     isField  = false;
     i32      stackOffset = 0; // set during codegen
     DeclKind kind() const override { return DeclKind::Var; }
 };
@@ -346,13 +357,18 @@ struct ParamDecl : Decl {
     DeclKind kind() const override { return DeclKind::Param; }
 };
 
+struct RecordDecl;
+
 struct FuncDecl : Decl {
     std::vector<Ptr<ParamDecl>> params;
     StmtPtr                     body;   // null → declaration only
-    bool                        isVirtual  = false;
-    bool                        isOverride = false;
+    Ref<RecordType>             parentRecordType;
+    bool                        isVirtual     = false;
+    bool                        isOverride    = false;
     bool                        isPureVirtual = false;
-    bool                        isVariadic = false;
+    bool                        isVariadic    = false;
+    bool                        isConstructor = false;
+    bool                        isDestructor  = false;
     DeclKind kind() const override { return DeclKind::Function; }
 };
 

@@ -67,8 +67,10 @@ IRValue IRBuilder::makeAlloca(TypePtr ty, std::string /*name*/) {
     IRInstr instr;
     instr.op     = IROpcode::Alloca;
     instr.opType = ty;
-    instr.dst    = newReg(ty);  // dst holds the pointer (as a virtual register)
-    IRValue dst  = instr.dst;   // capture before move
+    // The result of alloca is a pointer to the type
+    TypePtr ptrTy = std::make_shared<PointerType>(ty);
+    instr.dst    = newReg(ptrTy);
+    IRValue dst  = instr.dst;
     emit(std::move(instr));
     return dst;
 }
@@ -333,7 +335,9 @@ static const char* opcodeName(IROpcode op) {
         case IROpcode::Sub:       return "sub";
         case IROpcode::Mul:       return "mul";
         case IROpcode::Div:       return "sdiv";
+        case IROpcode::UDiv:      return "udiv";
         case IROpcode::Mod:       return "srem";
+        case IROpcode::UMod:      return "urem";
         case IROpcode::And:       return "and";
         case IROpcode::Or:        return "or";
         case IROpcode::Xor:       return "xor";

@@ -22,11 +22,30 @@
 
 Requires CMake 3.20+ and a C++17 compliant compiler.
 
+### macOS
 ```bash
 mkdir build
 cd build
 cmake ..
-make -j$(sysctl -n hw.ncpu) # Or nproc on Linux
+make -j$(sysctl -n hw.ncpu)
+```
+
+### Linux
+```bash
+mkdir build
+cd build
+cmake ..
+make -j$(nproc)
+```
+
+### Windows
+You can build using Visual Studio's developer command prompt or PowerShell.
+
+```powershell
+mkdir build
+cd build
+cmake ..
+cmake --build . --config Release
 ```
 
 ## Usage

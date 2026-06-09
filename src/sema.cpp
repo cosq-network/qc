@@ -94,11 +94,34 @@ void Sema::analyseDecl(Decl* d) {
 // ============================================================
 void Sema::analyseVarDecl(VarDecl* d) {
     if (!d) return;
-    d->isGlobal = (scopes_.size() == 1);
+    d->isGlobal = (scopes_.size() == 1 && !d->isField);
     // If no type yet, assign int
     if (!d->type) {
         d->type = types_.intTy();
     }
+
+    Type* rawTy = d->type.get();
+    if (rawTy->kind() == TypeKind::Class || rawTy->kind() == TypeKind::Struct) {
+        auto* rt = static_cast<RecordType*>(rawTy);
+        
+        // Resolve constructor
+        std::vector<TypePtr> argTypes;
+        for (auto& arg : d->args) {
+            analyseExpr(arg.get());
+            argTypes.push_back(arg->type);
+        }
+        
+        if (!d->args.empty() || rt->findConstructor({})) {
+            d->constructor = rt->findConstructor(argTypes);
+            if (!d->constructor && (!d->args.empty() || !d->init)) {
+                diag_.error(d->loc, "no matching constructor for " + rt->toString());
+            }
+        }
+        
+        // Resolve destructor
+        d->destructor = rt->findDestructor();
+    }
+
     // Analyse initializer
     if (d->init) {
         analyseExpr(d->init.get());
@@ -109,12 +132,14 @@ void Sema::analyseVarDecl(VarDecl* d) {
             }
         }
     }
-    // Add to scope
-    Symbol sym;
-    sym.name = d->name;
-    sym.decl = d;
-    sym.type = d->type;
-    define(std::move(sym));
+    // Add to scope if not a field
+    if (!d->isField) {
+        Symbol sym;
+        sym.name = d->name;
+        sym.decl = d;
+        sym.type = d->type;
+        define(std::move(sym));
+    }
 }
 
 void Sema::analyseFuncDecl(FuncDecl* d) {
@@ -132,6 +157,17 @@ void Sema::analyseFuncDecl(FuncDecl* d) {
     currentFunc_ = d;
 
     pushScope();
+
+    // Inject 'this' pointer if non-static member function
+    if (d->parentRecordType && !d->isStatic) {
+        bool alreadyHasThis = !d->params.empty() && d->params[0]->name == "this";
+        if (!alreadyHasThis) {
+            auto thisParam = make<ParamDecl>();
+            thisParam->name = "this";
+            thisParam->type = types_.ptrTo(d->parentRecordType);
+            d->params.insert(d->params.begin(), std::move(thisParam));
+        }
+    }
 
     // Add parameters to scope
     for (auto& param : d->params) {
@@ -559,17 +595,37 @@ void Sema::analyseGeneric(GenericExpr* e) {
 
 void Sema::analyseIdent(IdentExpr* e) {
     if (e->name == "this") {
-        if (currentFunc_) {
-            e->type = types_.ptrTo(types_.voidTy()); // simplified
+        if (currentFunc_ && currentFunc_->parentRecordType) {
+            e->type = types_.ptrTo(currentFunc_->parentRecordType);
         } else {
             diag_.error(e->loc, "'this' outside of member function");
-            e->type = types_.ptrTo(types_.voidTy());
+            e->type = types_.intTy();
         }
         return;
     }
 
     Symbol* sym = lookup(e->name);
     if (!sym) {
+        // Try implicit member access if in a member function
+        if (currentFunc_ && currentFunc_->parentRecordType) {
+            auto* rt = currentFunc_->parentRecordType.get();
+            int fIdx = rt->fieldIndex(e->name);
+            if (fIdx >= 0) {
+                e->field = const_cast<FieldInfo*>(&rt->fields()[fIdx]);
+                e->type = e->field->type;
+                e->isLValue = true;
+                e->isImplicitThis = true;
+                return;
+            }
+            int mIdx = rt->methodIndex(e->name);
+            if (mIdx >= 0) {
+                e->method = const_cast<MethodInfo*>(&rt->methods()[mIdx]);
+                e->type = e->method->type;
+                e->isImplicitThis = true;
+                return;
+            }
+        }
+
         // Don't error on common builtins
         if (e->name == "__func__" || e->name == "__FUNCTION__" || e->name == "__PRETTY_FUNCTION__") {
             QualFlags qf; qf.isConst = true;
@@ -872,16 +928,24 @@ void Sema::analyseMember(MemberExpr* e) {
 
     auto* rt = static_cast<RecordType*>(bt);
     int idx = rt->fieldIndex(e->member);
-    if (idx < 0) {
-        diag_.error(e->loc, "no member '" + e->member + "' in " + rt->toString());
-        e->type = types_.intTy();
+    if (idx >= 0) {
+        const FieldInfo& fi = rt->fields()[idx];
+        e->field    = const_cast<FieldInfo*>(&fi);
+        e->type     = fi.type;
+        e->isLValue = e->isArrow || (e->base && e->base->isLValue);
         return;
     }
 
-    const FieldInfo& fi = rt->fields()[idx];
-    e->field    = const_cast<FieldInfo*>(&fi);
-    e->type     = fi.type;
-    e->isLValue = e->base->isLValue || e->isArrow;
+    int mIdx = rt->methodIndex(e->member);
+    if (mIdx >= 0) {
+        const MethodInfo& mi = rt->methods()[mIdx];
+        e->method = const_cast<MethodInfo*>(&mi);
+        e->type   = mi.type;
+        return;
+    }
+
+    diag_.error(e->loc, "no member '" + e->member + "' in " + rt->toString());
+    e->type = types_.intTy();
 }
 
 void Sema::analyseCast(CastExpr* e) {

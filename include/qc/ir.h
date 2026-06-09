@@ -44,7 +44,7 @@ enum class IROpcode {
     Load,     // dst = load ptr
     Store,    // store val, ptr
     // Arithmetic
-    Add, Sub, Mul, Div, Mod,
+    Add, Sub, Mul, Div, Mod, UDiv, UMod,
     And, Or, Xor, Shl, Shr, AShr,
     Neg, Not,
     FAdd, FSub, FMul, FDiv, FNeg,

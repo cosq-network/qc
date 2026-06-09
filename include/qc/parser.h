@@ -89,14 +89,18 @@ private:
     // --- Helpers ---
     Token  cur()  { return pp_.peek(); }
     Token  next() { return pp_.next(); }
+    Token  peek(); // peek at token after cur()
     Token  consume(TokenKind k, const char* msg);
     bool   check(TokenKind k) { return cur().is(k); }
     bool   match(TokenKind k);
     bool   atEnd() { return cur().is(TokenKind::Eof); }
 
     TypePtr lookupTypeName(std::string_view name);
-    bool    isTypeName(const Token& tok);
-    bool    isStartOfDeclaration();
+    bool         isTypeName(const Token& tok);
+    bool         isStartOfDeclaration();
+    bool         isStartOfDeclaration(const Token& t);
+    bool         isStartOfParameterList();
+
 
     Preprocessor& pp_;
     TypeContext& types_;
@@ -109,6 +113,9 @@ private:
         std::unordered_map<std::string, Ref<EnumType>>   enums;
     };
     std::vector<Scope> scopes_;
+    std::vector<DeclPtr> pendingDecls_;
+    RecordDecl* currentRecord_ = nullptr;
+
     void pushScope() { scopes_.emplace_back(); }
     void popScope()  { scopes_.pop_back(); }
     void defineTypedef(std::string name, TypePtr t) {

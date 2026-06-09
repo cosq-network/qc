@@ -30,6 +30,11 @@ Ptr<TranslationUnit> Parser::parse() {
         if (auto d = parseTopLevelDecl()) {
             tu->decls.push_back(std::move(d));
         }
+        // Drain any records defined as side-effects of decl specs
+        while (!pendingDecls_.empty()) {
+            tu->decls.push_back(std::move(pendingDecls_.front()));
+            pendingDecls_.erase(pendingDecls_.begin());
+        }
     }
     return tu;
 }
@@ -64,13 +69,23 @@ TypePtr Parser::lookupTypeName(std::string_view name) {
     return nullptr;
 }
 
+Token Parser::peek() {
+    Token t1 = next();
+    Token t2 = cur();
+    pp_.putBack(t1);
+    return t2;
+}
+
 bool Parser::isTypeName(const Token& tok) {
     if (!tok.is(TokenKind::Identifier)) return false;
     return lookupTypeName(tok.text) != nullptr;
 }
 
 bool Parser::isStartOfDeclaration() {
-    Token t = cur();
+    return isStartOfDeclaration(cur());
+}
+
+bool Parser::isStartOfDeclaration(const Token& t) {
     switch (t.kind) {
     case TokenKind::Kw__Static_assert:
     case TokenKind::Kw_auto:
@@ -113,6 +128,13 @@ bool Parser::isStartOfDeclaration() {
     default:
         return false;
     }
+}
+
+bool Parser::isStartOfParameterList() {
+    Token t2 = peek();
+    if (t2.is(TokenKind::RParen)) return true;
+    if (t2.is(TokenKind::Ellipsis)) return true;
+    return isStartOfDeclaration(t2);
 }
 
 // ============================================================
@@ -333,96 +355,32 @@ TypePtr Parser::parseTypeSpecifier(DeclSpec& ds) {
                         : t.is(TokenKind::Kw_class) ? TypeKind::Class
                         : TypeKind::Struct;
             next(); // consume struct/union/class
-            // Optional tag name
-            std::string tagName;
-            if (cur().is(TokenKind::Identifier)) {
-                tagName = cur().text;
-                next();
-            }
-            // Optional body
-            if (cur().is(TokenKind::LBrace)) {
-                // Full definition
-                // Re-position: we'll call parseRecordDecl helper with already-consumed kind
-                // Build inline record
-                auto rec = types_.makeRecord(rk, tagName);
-                // Store tag
-                if (!tagName.empty()) {
-                    scopes_.back().tags[tagName] = rec;
-                }
-                consume(TokenKind::LBrace, "expected '{'");
-                pushScope();
-                while (!atEnd() && !cur().is(TokenKind::RBrace)) {
-                    if (cur().is(TokenKind::Semicolon)) { next(); continue; }
-                    // Access specifiers inside class
-                    if (cur().is(TokenKind::Kw_public) || cur().is(TokenKind::Kw_protected) || cur().is(TokenKind::Kw_private)) {
-                        next();
-                        consume(TokenKind::Colon, "expected ':' after access specifier");
-                        continue;
-                    }
-                    DeclSpec fds = parseDeclSpec();
-                    if (cur().is(TokenKind::Semicolon)) {
-                        next();
-                        continue;
-                    }
-                    // Parse multiple declarators for this field
-                    bool firstField = true;
-                    while (!atEnd() && !cur().is(TokenKind::Semicolon)) {
-                        if (!firstField) consume(TokenKind::Comma, "expected ','");
-                        firstField = false;
-                        std::string fname;
-                        TypePtr ftype = parseDeclarator(fds.baseType, fname);
-                        i32 bitWidth = -1;
-                        if (cur().is(TokenKind::Colon)) {
-                            next();
-                            // bit width: constant expression
-                            auto bwExpr = parseUnaryExpr();
-                            if (bwExpr && bwExpr->kind() == ExprKind::IntLit) {
-                                bitWidth = (i32)static_cast<IntLitExpr*>(bwExpr.get())->value;
-                            }
-                        }
-                        FieldInfo fi;
-                        fi.name     = fname;
-                        fi.type     = ftype;
-                        fi.bitWidth = bitWidth;
-                        rec->addField(fi);
-                    }
-                    consume(TokenKind::Semicolon, "expected ';' after field declaration");
-                }
-                popScope();
-                consume(TokenKind::RBrace, "expected '}' to close record");
-                rec->finalize();
-                baseType = rec;
+            
+            auto rd = parseRecordDecl(rk);
+            baseType = rd->recordType;
+
+            // Capture the declaration
+            if (currentRecord_) {
+                currentRecord_->members.push_back(std::move(rd));
             } else {
-                // Forward reference or use of existing tag
-                if (!tagName.empty()) {
-                    // Look up in tag scopes
-                    for (int i = (int)scopes_.size() - 1; i >= 0; --i) {
-                        auto it = scopes_[i].tags.find(tagName);
-                        if (it != scopes_[i].tags.end()) {
-                            baseType = it->second;
-                            break;
-                        }
-                    }
-                    if (!baseType) {
-                        // Create incomplete forward declaration
-                        auto rec = types_.makeRecord(rk, tagName);
-                        scopes_.back().tags[tagName] = rec;
-                        baseType = rec;
-                    }
-                } else {
-                    diag_.error(t.loc, "expected tag name or '{' after struct/union/class");
-                    baseType = types_.intTy();
-                }
+                pendingDecls_.push_back(std::move(rd));
             }
+            
             running = false;
             break;
         }
 
         case TokenKind::Kw_enum: {
             next(); // consume 'enum'
-            auto enumDecl = parseEnumDecl();
-            if (enumDecl && enumDecl->enumType) {
-                baseType = enumDecl->enumType;
+            auto ed = parseEnumDecl();
+            if (ed && ed->enumType) {
+                baseType = ed->enumType;
+                // Capture the declaration
+                if (currentRecord_) {
+                    currentRecord_->members.push_back(std::move(ed));
+                } else {
+                    pendingDecls_.push_back(std::move(ed));
+                }
             } else {
                 baseType = types_.intTy();
             }
@@ -674,19 +632,20 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
             return type;
         }
     }
-
     // Name
     if (cur().is(TokenKind::Identifier)) {
         nameOut = cur().text;
         next();
         // Handle :: scope resolution
         while (cur().is(TokenKind::ColonColon)) {
+            nameOut += "::";
             next();
             if (cur().is(TokenKind::Identifier)) {
-                nameOut = cur().text;
+                nameOut += cur().text;
                 next();
             }
         }
+
         // Template argument list
         if (cur().is(TokenKind::Lt)) {
             next();
@@ -717,7 +676,7 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
     type = parseArraySuffix(type);
 
     // Function parameter list suffix
-    if (cur().is(TokenKind::LParen)) {
+    if (cur().is(TokenKind::LParen) && isStartOfParameterList()) {
         next(); // consume '('
         std::vector<ParamInfo> params;
         bool variadic = false;
@@ -815,6 +774,9 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
         next();
     }
 
+    auto prevRecord = currentRecord_;
+    currentRecord_ = rd.get();
+
     // Base class list (C++): class Foo : public Bar
     if (cur().is(TokenKind::Colon)) {
         next();
@@ -851,10 +813,12 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
     // Register tag
     if (!rd->name.empty()) {
         scopes_.back().tags[rd->name] = recType;
+        // In C++, struct/class names are also type names
+        defineTypedef(rd->name, recType);
     }
 
     if (!cur().is(TokenKind::LBrace)) {
-        // Forward declaration
+        currentRecord_ = prevRecord;
         return rd;
     }
 
@@ -863,12 +827,14 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
 
     while (!atEnd() && !cur().is(TokenKind::RBrace)) {
         if (cur().is(TokenKind::Semicolon)) { next(); continue; }
+
         // Access specifiers
         if (cur().is(TokenKind::Kw_public) || cur().is(TokenKind::Kw_protected) || cur().is(TokenKind::Kw_private)) {
             next();
             consume(TokenKind::Colon, "expected ':'");
             continue;
         }
+
         // Friend declaration
         if (cur().is(TokenKind::Kw_friend)) {
             next();
@@ -877,14 +843,56 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
             consume(TokenKind::Semicolon, "expected ';'");
             continue;
         }
+
+        SourceLocation memberLoc = cur().loc;
+
+        // Handle constructor/destructor (no return type)
+        bool isDtor = cur().is(TokenKind::Tilde);
+        if (isDtor || (cur().is(TokenKind::Identifier) && cur().text == rd->name && peek().is(TokenKind::LParen))) {
+            if (isDtor) next(); // consume ~
+            if (cur().is(TokenKind::Identifier) && cur().text == rd->name) {
+                std::string methodName;
+                TypePtr fnType = parseDeclarator(types_.voidTy(), methodName);
+                if (isDtor) methodName = "~" + methodName;
+
+                DeclSpec emptyDS;
+                auto fd = parseFunctionDecl(emptyDS, fnType, methodName, memberLoc);
+                fd->isConstructor = !isDtor;
+                fd->isDestructor = isDtor;
+                fd->parentRecordType = rd->recordType;
+
+                MethodInfo mi;
+                mi.name = methodName;
+                mi.type = fnType;
+                mi.isConstructor = fd->isConstructor;
+                mi.isDestructor = fd->isDestructor;
+                recType->addMethod(mi);
+
+                rd->members.push_back(std::move(fd));
+                continue;
+            }
+        }
+
         // Nested type or member
         auto decl = parseDeclaration();
         if (decl) {
-            if (decl->kind() == DeclKind::Var || decl->kind() == DeclKind::Field) {
+            if (decl->kind() == DeclKind::Var) {
+                auto* vd = static_cast<VarDecl*>(decl.get());
+                vd->isField = true;
                 FieldInfo fi;
-                fi.name = decl->name;
-                fi.type = decl->type;
+                fi.name = vd->name;
+                fi.type = vd->type;
                 recType->addField(fi);
+            } else if (decl->kind() == DeclKind::Function) {
+                auto* fd = static_cast<FuncDecl*>(decl.get());
+                fd->parentRecordType = rd->recordType;
+                MethodInfo mi;
+                mi.name = fd->name;
+                mi.type = fd->type;
+                mi.isStatic = fd->isStatic;
+                mi.isConstructor = fd->isConstructor;
+                mi.isDestructor = fd->isDestructor;
+                recType->addMethod(mi);
             }
             rd->members.push_back(std::move(decl));
         }
@@ -894,6 +902,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
     consume(TokenKind::RBrace, "expected '}' to close record");
     recType->finalize();
 
+    currentRecord_ = prevRecord;
     return rd;
 }
 
@@ -908,9 +917,7 @@ Ptr<EnumDecl> Parser::parseEnumDecl() {
     ed->loc = loc;
 
     // Scoped enum: enum class / enum struct
-    bool isScoped = false;
     if (cur().is(TokenKind::Kw_class) || cur().is(TokenKind::Kw_struct)) {
-        isScoped = true;
         next();
     }
 
@@ -1071,22 +1078,14 @@ Ptr<FuncDecl> Parser::parseFunctionDecl(DeclSpec& ds, TypePtr fnType, std::strin
 
     // Function body or declaration
     if (cur().is(TokenKind::LBrace)) {
-        pushScope();
-        // Add params to scope
-        for (auto& pd : fd->params) {
-            // They'll be added by sema; just push scope
-        }
         fd->body = parseCompoundStmt();
-        popScope();
     } else if (cur().is(TokenKind::Colon)) {
         // Constructor initializer list — skip it
         next();
         while (!atEnd() && !cur().is(TokenKind::LBrace)) {
             next();
         }
-        pushScope();
         fd->body = parseCompoundStmt();
-        popScope();
     } else {
         // Declaration only
         consume(TokenKind::Semicolon, "expected ';' after function declaration");
@@ -1126,9 +1125,11 @@ Ptr<VarDecl> Parser::parseVarDecl(DeclSpec& ds, TypePtr type, std::string name, 
             vd->init = parseAssignExpr();
         }
     } else if (cur().is(TokenKind::LParen)) {
-        // Constructor-style: int x(5);
+        // Constructor-style: Foo f(1, 2);
         next();
-        vd->init = parseAssignExpr();
+        if (!cur().is(TokenKind::RParen)) {
+            vd->args = parseArgList();
+        }
         consume(TokenKind::RParen, "expected ')'");
     } else if (cur().is(TokenKind::LBrace)) {
         // Brace-init: int x{5};

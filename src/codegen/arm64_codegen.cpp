@@ -54,6 +54,8 @@ static const char* dRegName(u32 r) {
 static constexpr u32 REG_X8  = 8;   // indirect result / scratch
 static constexpr u32 REG_X9  = 9;   // scratch
 static constexpr u32 REG_X10 = 10;  // scratch
+static constexpr u32 REG_X11 = 11;  // scratch
+static constexpr u32 REG_X12 = 12;  // scratch
 static constexpr u32 REG_V0  = 32;  // FP regs start at 32
 static constexpr u32 REG_V8  = 32 + 8;
 
@@ -95,6 +97,7 @@ struct ARM64LineInfo {
 struct ARM64FuncCtx {
     std::unordered_map<u64, u32> virToPhys;
     std::unordered_map<u64, i32> spillSlots; // sp-relative offset
+    std::unordered_map<u64, i32> allocaOffsets; // sp-relative offset
     i32  nextSpillOff = 0;   // grows upward from frame base (positive)
     i32  frameSize    = 0;   // total frame, must be 16-byte aligned
     bool usedCalleeGPR[32] = {};
@@ -234,25 +237,28 @@ void ARM64CodeGen::allocateRegisters(const IRFunction& fn, ARM64FuncCtx& ctx) {
 
     u32 numValues = (u32)fn.nextReg;
     i32 spillSize = numValues * 8;
-
-    // Count alloca instructions to add their sizes
     i32 allocaSize = 0;
     for (auto& bb : fn.blocks) {
         for (auto& ins : bb.instrs) {
             if (ins.op == IROpcode::Alloca && ins.opType) {
-                allocaSize += (i32)((ins.opType->size() + 7) & ~7u);
+                // simple layout: just pack them
+                u32 align = ins.align > 0 ? ins.align : ins.opType->align();
+                if (align < 1) align = 1;
+                allocaSize = (allocaSize + align - 1) & ~(align - 1);
+                ctx.allocaOffsets[ins.dst.id] = allocaSize;
+                allocaSize += ins.opType->size();
             }
         }
     }
 
     ctx.frameSize = 16 + spillSize + allocaSize;
-    // Align to 16
     ctx.frameSize = (ctx.frameSize + 15) & ~15;
 
-    // Assign spill slots
+    // Assign spill slots (after allocas)
     for (u64 i = 0; i < fn.nextReg; ++i) {
-        ctx.spillSlots[i] = (i32)(i * 8);
+        ctx.spillSlots[i] = allocaSize + (i32)(i * 8);
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +279,15 @@ u32 ARM64CodeGen::loadGPR(const IRValue& v, ARM64FuncCtx& ctx, u32 scratch) {
     if (v.kind == IRValueKind::Register) {
         if (ctx.virToPhys.count(v.id)) return ctx.virToPhys[v.id];
         if (ctx.spillSlots.count(v.id)) {
-            ctx.emitInst("ldr " + std::string(xRegName(scratch)) + ", " + spOff(ctx.spillSlots[v.id]));
+            u32 size = v.type ? v.type->size() : 8;
+            bool isSigned = v.type && v.type->isSigned();
+            std::string ldr = "ldr";
+            std::string reg = xRegName(scratch);
+            if (size == 1)      { ldr = isSigned ? "ldrsb" : "ldrb"; reg = isSigned ? xRegName(scratch) : wRegName(scratch); }
+            else if (size == 2) { ldr = isSigned ? "ldrsh" : "ldrh"; reg = isSigned ? xRegName(scratch) : wRegName(scratch); }
+            else if (size == 4) { ldr = isSigned ? "ldrsw" : "ldr";  reg = isSigned ? xRegName(scratch) : wRegName(scratch); }
+
+            ctx.emitInst(ldr + " " + reg + ", " + spOff(ctx.spillSlots[v.id]));
             return scratch;
         }
     }
@@ -338,21 +352,6 @@ void ARM64CodeGen::compileFunction(const IRFunction& fn) {
         }
     }
 
-    // --- Alloca initialization ---
-    u32 numValues = (u32)fn.nextReg;
-    i32 allocaOff = numValues * 8;
-    for (auto& bb : fn.blocks) {
-        for (auto& ins : bb.instrs) {
-            if (ins.op == IROpcode::Alloca && ins.opType) {
-                u32 sz = (u32)ins.opType->size();
-                sz = (sz + 7) & ~7u;
-                ctx.emitInst("add x9, sp, #" + std::to_string(allocaOff));
-                ctx.emitInst("str x9, " + spOff(ctx.spillSlots[ins.dst.id]));
-                allocaOff += sz;
-            }
-        }
-    }
-
     // --- Blocks ---
     for (auto& bb : fn.blocks) {
         ctx.emitLabel(localLabel(fn.name, bb.name));
@@ -381,6 +380,10 @@ void ARM64CodeGen::emitInstr(const IRInstr& ins, ARM64FuncCtx& ctx) {
         case IROpcode::Add:
         case IROpcode::Sub:
         case IROpcode::Mul:
+        case IROpcode::Div:
+        case IROpcode::UDiv:
+        case IROpcode::Mod:
+        case IROpcode::UMod:
         case IROpcode::And:
         case IROpcode::Or:
         case IROpcode::Xor:     emitBinop(ins, ctx);  break;
@@ -406,21 +409,39 @@ void ARM64CodeGen::emitInstr(const IRInstr& ins, ARM64FuncCtx& ctx) {
 }
 
 void ARM64CodeGen::emitAlloca(const IRInstr& ins, ARM64FuncCtx& ctx) {
-    // Handled in the prologue
-    (void)ins; (void)ctx;
+    u32 dst = REG_X9;
+    i32 off = ctx.allocaOffsets[ins.dst.id];
+    ctx.emitInst("add " + std::string(xRegName(dst)) + ", sp, #" + std::to_string(off));
+    ctx.emitInst("str " + std::string(xRegName(dst)) + ", " + spOff(ctx.spillSlots[ins.dst.id]));
 }
 
 void ARM64CodeGen::emitLoad(const IRInstr& ins, ARM64FuncCtx& ctx) {
     u32 ptrReg = loadGPR(ins.srcs[0], ctx, REG_X9);
     u32 dstReg = REG_X10;
-    ctx.emitInst("ldr " + std::string(xRegName(dstReg)) + ", [" + xRegName(ptrReg) + "]");
+
+    u32 size = ins.opType ? ins.opType->size() : 8;
+    std::string ldr = "ldr";
+    std::string reg = xRegName(dstReg);
+    if (size == 1) { ldr = "ldrb"; reg = wRegName(dstReg); }
+    else if (size == 2) { ldr = "ldrh"; reg = wRegName(dstReg); }
+    else if (size == 4) { reg = wRegName(dstReg); }
+
+    ctx.emitInst(ldr + " " + reg + ", [" + xRegName(ptrReg) + "]");
     ctx.emitInst("str " + std::string(xRegName(dstReg)) + ", " + spOff(ctx.spillSlots[ins.dst.id]));
 }
 
 void ARM64CodeGen::emitStore(const IRInstr& ins, ARM64FuncCtx& ctx) {
     u32 valReg = loadGPR(ins.srcs[0], ctx, REG_X9);
     u32 ptrReg = loadGPR(ins.srcs[1], ctx, REG_X10);
-    ctx.emitInst("str " + std::string(xRegName(valReg)) + ", [" + xRegName(ptrReg) + "]");
+
+    u32 size = ins.srcs[0].type ? ins.srcs[0].type->size() : 8;
+    std::string st = "str";
+    std::string reg = xRegName(valReg);
+    if (size == 1) { st = "strb"; reg = wRegName(valReg); }
+    else if (size == 2) { st = "strh"; reg = wRegName(valReg); }
+    else if (size == 4) { reg = wRegName(valReg); }
+
+    ctx.emitInst(st + " " + reg + ", [" + xRegName(ptrReg) + "]");
 }
 
 void ARM64CodeGen::emitBinop(const IRInstr& ins, ARM64FuncCtx& ctx) {
@@ -433,6 +454,17 @@ void ARM64CodeGen::emitBinop(const IRInstr& ins, ARM64FuncCtx& ctx) {
         case IROpcode::Add: op = "add"; break;
         case IROpcode::Sub: op = "sub"; break;
         case IROpcode::Mul: op = "mul"; break;
+        case IROpcode::Div: op = "sdiv"; break;
+        case IROpcode::UDiv: op = "udiv"; break;
+        case IROpcode::Mod:
+        case IROpcode::UMod: {
+            bool isSigned = (ins.op == IROpcode::Mod);
+            u32 quot = REG_X11;
+            ctx.emitInst(std::string(isSigned ? "sdiv " : "udiv ") + xRegName(quot) + ", " + xRegName(lhs) + ", " + xRegName(rhs));
+            ctx.emitInst("msub " + std::string(xRegName(dst)) + ", " + xRegName(quot) + ", " + xRegName(rhs) + ", " + xRegName(lhs));
+            ctx.emitInst("str " + std::string(xRegName(dst)) + ", " + spOff(ctx.spillSlots[ins.dst.id]));
+            return;
+        }
         case IROpcode::And: op = "and"; break;
         case IROpcode::Or:  op = "orr"; break;
         case IROpcode::Xor: op = "eor"; break;

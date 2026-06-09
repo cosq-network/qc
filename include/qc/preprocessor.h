@@ -43,7 +43,7 @@ private:
     std::vector<std::string>  includePaths_;
     std::vector<IncludeState> includeStack_;
     std::unordered_map<std::string, Macro> macros_;
-    std::optional<Token> putBack_;
+    std::vector<Token>   putBackStack_;
     std::vector<Token>   macroExpansionTokens_; // currently expanded tokens
 
     struct CondState {

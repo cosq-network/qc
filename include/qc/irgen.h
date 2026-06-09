@@ -43,6 +43,7 @@ private:
     IRValue genUnary(const UnaryExpr* e);
     IRValue genTernary(const TernaryExpr* e);
     IRValue genCall(const CallExpr* e);
+    IRValue genMemberCall(const CallExpr* e, IRValue base, const MethodInfo* method);
     IRValue genIndex(const IndexExpr* e);
     IRValue genMember(const MemberExpr* e);
     IRValue genCast(const CastExpr* e);
@@ -52,6 +53,8 @@ private:
     IRValue genInitList(const InitListExpr* e, IRValue dest);
 
     // --- Helpers ---
+    std::string mangle(const FuncDecl* d);
+    std::string mangleMethod(const RecordType* parent, const MethodInfo* method);
     IRValue  coerce(IRValue v, Type* from, Type* to);
     IRValue  boolify(IRValue v);
     IROpcode selectIntCmp(BinaryOp op, bool isSigned);
@@ -73,8 +76,19 @@ private:
     IRBuilder          builder_;
     IRFunction*        curFn_    = nullptr;
 
-    // Variable → alloca map
+    // Scope state
+    struct Cleanup {
+        const MethodInfo* destructor;
+        IRValue           thisPtr;
+    };
+    std::vector<std::vector<Cleanup>> cleanupStack_;
+
+    void pushScope() { cleanupStack_.emplace_back(); }
+    void popScope();
+    void emitPopScope(); // emit destructors for current scope without popping
+
     std::unordered_map<const Decl*, IRValue> varMap_;
+    IRValue thisAlloca_;
     // String literal → global name map
     std::unordered_map<std::string, std::string> stringMap_;
     // Label → block map
