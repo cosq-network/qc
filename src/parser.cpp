@@ -143,6 +143,18 @@ bool Parser::isStartOfParameterList() {
 DeclPtr Parser::parseTopLevelDecl() {
     Token t = cur();
 
+    // Handle extern "C"
+    if (t.is(TokenKind::Kw_extern) && peek().is(TokenKind::StringLit)) {
+        next(); // consume extern
+        next(); // consume string literal
+        
+        if (cur().is(TokenKind::LBrace)) {
+            // extern "C" { ... } not supported yet, but we could just consume '{' and leave it.
+            // Let's just handle extern "C" decl for now.
+        }
+        return parseDeclaration();
+    }
+
     // Handle namespace
     if (t.is(TokenKind::Kw_namespace)) {
         return parseNamespaceDecl();
@@ -1759,7 +1771,7 @@ ExprPtr Parser::parseCastExpr() {
         // Lookahead: is this a cast?
         // We peek if inside are type specifiers
         // Simple heuristic: if the next token is a type keyword or typedef name, it's a cast
-        Token inner = pp_.peek(); // token after '('
+        Token inner = peek(); // token after '('
         bool isCast = false;
         switch (inner.kind) {
         case TokenKind::Kw_char: case TokenKind::Kw_short: case TokenKind::Kw_int:

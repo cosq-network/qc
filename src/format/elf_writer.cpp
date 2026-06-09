@@ -236,14 +236,14 @@ std::vector<u8> ELFWriter::emit() {
         // st_other
         esym.st_other = STV_DEFAULT;
         // st_shndx
-        if (sym.isExternal || sym.sectionIndex == 0) {
+        if (sym.isExternal) {
             esym.st_shndx = 0; // SHN_UNDEF
         } else if (sym.sectionIndex == 0xfff1u) {
             esym.st_shndx = 0xfff1; // SHN_ABS
         } else {
             // sectionIndex is 0-based index into sections_, shIndex = that + 1
             u32 sidx = sym.sectionIndex;
-            esym.st_shndx = (sidx < numUserSections) ? static_cast<u16>(sidx + 1) : 0;
+            esym.st_shndx = static_cast<u16>(sidx + 1);
         }
         esym.st_value = sym.value;
         esym.st_size  = sym.size;

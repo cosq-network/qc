@@ -131,7 +131,9 @@ class ARM64CodeGen : public CodeGen {
 public:
     explicit ARM64CodeGen(const TargetInfo& target, DiagEngine& diag)
         : target_(target), diag_(diag) {
-        isMachO_ = (target_.format == TargetFormat::PE || target_.os == TargetOS::MacOS);
+        // Only use underscore prefix for systems that expect it (like Mach-O or Windows PE)
+        // For now, we only support ELF and PE. ELF typically does not use underscores.
+        isMachO_ = (target_.format == TargetFormat::PE); 
     }
 
     void compile(const IRModule& mod) override;
@@ -831,6 +833,7 @@ std::vector<u8> ARM64CodeGen::emitObject() {
             sym.size         = fnSize;
             sym.binding      = STB_GLOBAL;
             sym.type         = STT_FUNC;
+            sym.sectionIndex = text.shIndex;
             sym.isExternal   = false;
             elf.addSymbol(sym);
         }
@@ -938,6 +941,7 @@ std::vector<u8> ARM64CodeGen::emitObject() {
             sym.size         = go.size;
             sym.binding      = STB_GLOBAL;
             sym.type         = STT_OBJECT;
+            sym.sectionIndex = (go.isConst ? rodata.shIndex : (go.isZeroInit ? bss.shIndex : data.shIndex));
             sym.isExternal   = false;
             elf.addSymbol(sym);
         }

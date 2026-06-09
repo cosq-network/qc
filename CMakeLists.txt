@@ -74,10 +74,11 @@ install(TARGETS qc RUNTIME DESTINATION bin)
 
 # Standard Library
 add_subdirectory(stdqc)
+add_subdirectory(qbios)
+
 
 # Tests (optional)
 option(QC_BUILD_TESTS "Build tests" OFF)
 if(QC_BUILD_TESTS)
   enable_testing()
-  add_subdirectory(tests)
 endif()

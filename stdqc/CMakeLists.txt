@@ -3,6 +3,7 @@
 add_library(stdqc STATIC
     src/c/stdio.cpp
     src/c/stdlib.cpp
+    src/c/string.cpp
     src/cxx/new.cpp
     src/arch/syscall.cpp
 )

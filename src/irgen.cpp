@@ -70,30 +70,38 @@ void IRGen::genVarDecl(const VarDecl* d) {
 
     if (d->isGlobal || d->isStatic) {
         // Emit a global variable.
-        IRGlobal g;
-        g.name      = d->name;
-        g.type      = d->type;
-        g.isConst   = d->isConstexpr || (d->type && d->type->quals().isConst);
-        g.isExtern  = d->isExtern;
-        g.isZeroInit = (!d->init);
-        g.align     = d->alignment;
+        IRGlobal* irg = mod_.findGlobal(d->name);
+        
+        if (!irg) {
+            IRGlobal g;
+            g.name      = d->name;
+            g.type      = d->type;
+            g.isConst   = d->isConstexpr || (d->type && d->type->quals().isConst);
+            g.isExtern  = d->isExtern;
+            g.isZeroInit = (!d->init);
+            g.align     = d->alignment;
+            mod_.globals.push_back(std::move(g));
+            irg = &mod_.globals.back();
+        }
 
+        // Update properties if we have an initializer now
         if (d->init) {
+            irg->isExtern = false;
+            irg->isZeroInit = false;
             if (d->init->kind() == ExprKind::IntLit) {
                 auto* il = static_cast<const IntLitExpr*>(d->init.get());
                 u64 val = il->value;
                 u32 sz = d->type ? (u32)d->type->size() : 4;
-                g.initData.resize(sz, 0);
-                std::memcpy(g.initData.data(), &val, std::min((u32)8, sz));
-                if (val == 0) g.isZeroInit = true;
+                irg->initData.clear();
+                irg->initData.resize(sz, 0);
+                std::memcpy(irg->initData.data(), &val, std::min((u32)8, sz));
+                if (val == 0) irg->isZeroInit = true;
             } else if (d->init->kind() == ExprKind::StringLit) {
                 auto* sl = static_cast<const StringLitExpr*>(d->init.get());
-                g.stringInit = sl->value;
-                g.hasStringInit = true;
+                irg->stringInit = sl->value;
+                irg->hasStringInit = true;
             }
         }
-
-        mod_.globals.push_back(std::move(g));
         return;
     }
 
@@ -163,46 +171,59 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
 
     builder_.setLoc(d->loc);
 
-    // Create or find function record.
-    IRFunction fn;
-    fn.name    = mangle(d);
-    fn.retType = types_.voidTy(); // default
-    if (d->type && d->type->isFunction()) {
-        auto* ft = static_cast<FunctionType*>(d->type.get());
-        fn.retType    = ft->returnType()
-                        ? std::shared_ptr<Type>(d->type, ft->returnType())
-                        : types_.voidTy();
-        fn.isVariadic = ft->isVariadic();
-    }
-    fn.isExtern = d->isExtern || !d->body;
-
-    // Build param list.
-    u64 pReg = 0;
-    if (d->parentRecordType && !d->isStatic) {
-        // Only inject if not already in d->params (Sema might have injected it)
-        bool hasThis = !d->params.empty() && d->params[0]->name == "this";
-        if (!hasThis) {
-            IRParam param;
-            param.name = "this";
-            param.type = types_.ptrTo(d->parentRecordType);
-            param.reg  = pReg++;
-            fn.params.push_back(param);
-            fn.nextReg = pReg;
+    std::string mangledName = mangle(d);
+    IRFunction* irfn = mod_.findFunction(mangledName);
+    
+    if (!irfn) {
+        IRFunction fn;
+        fn.name    = mangledName;
+        fn.retType = types_.voidTy(); // default
+        if (d->type && d->type->isFunction()) {
+            auto* ft = static_cast<FunctionType*>(d->type.get());
+            fn.retType    = ft->returnType()
+                            ? std::shared_ptr<Type>(d->type, ft->returnType())
+                            : types_.voidTy();
+            fn.isVariadic = ft->isVariadic();
         }
+        mod_.functions.push_back(std::move(fn));
+        irfn = &mod_.functions.back();
     }
 
-    for (auto& p : d->params) {
-        IRParam param;
-        param.name = p->name;
-        param.type = p->type;
-        param.reg  = pReg++;
-        fn.params.push_back(param);
-        fn.nextReg = pReg; // keep nextReg ahead of param regs
+    // Update properties. If we have a body, it's no longer extern.
+    if (d->body) {
+        irfn->isExtern = false;
+    } else if (irfn->blocks.empty()) {
+        // If no blocks and no body in this decl, it's extern for now.
+        irfn->isExtern = d->isExtern || true; 
     }
-    fn.isVariadic = d->isVariadic;
 
-    mod_.functions.push_back(std::move(fn));
-    IRFunction* irfn = &mod_.functions.back();
+    // Build param list if not already built.
+    if (irfn->params.empty()) {
+        u64 pReg = 0;
+        if (d->parentRecordType && !d->isStatic) {
+            // Only inject if not already in d->params (Sema might have injected it)
+            bool hasThis = !d->params.empty() && d->params[0]->name == "this";
+            if (!hasThis) {
+                IRParam param;
+                param.name = "this";
+                param.type = types_.ptrTo(d->parentRecordType);
+                param.reg  = pReg++;
+                irfn->params.push_back(param);
+                irfn->nextReg = pReg;
+            }
+        }
+
+        for (auto& p : d->params) {
+            IRParam param;
+            param.name = p->name;
+            param.type = p->type;
+            param.reg  = pReg++;
+            irfn->params.push_back(param);
+            irfn->nextReg = pReg; // keep nextReg ahead of param regs
+        }
+        irfn->isVariadic = d->isVariadic;
+    }
+
     curFn_ = irfn;
 
     if (!d->body) {

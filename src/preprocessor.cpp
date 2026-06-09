@@ -159,6 +159,9 @@ void Preprocessor::handleDirective(Token hashTok) {
         std::string filename;
         if (fileTok.is(TokenKind::StringLit)) {
             filename = fileTok.text;
+            if (filename.size() >= 2 && filename.front() == '"' && filename.back() == '"') {
+                filename = filename.substr(1, filename.size() - 2);
+            }
         } else if (fileTok.is(TokenKind::Lt)) {
             // <file.h>
             while (true) {

@@ -1807,7 +1807,7 @@ std::vector<u8> X64CodeGen::emitObject() {
 
             ELFSymbol sym;
             sym.name         = go.name;
-            sym.sectionIndex = 0; // filled in by ELFWriter
+            sym.sectionIndex = (go.isConst ? rodata.shIndex : (go.isZeroInit ? bss.shIndex : data.shIndex));
             sym.value        = off;
             sym.size         = go.size;
             sym.binding      = STB_GLOBAL;
