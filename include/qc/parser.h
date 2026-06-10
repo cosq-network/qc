@@ -106,6 +106,8 @@ private:
     TypeContext& types_;
     DiagEngine& diag_;
 
+    bool lastFunctionWasOverride = false;
+
     // Symbol table (typedef names, tag types)
     struct Scope {
         std::unordered_map<std::string, TypePtr>  typedefs;

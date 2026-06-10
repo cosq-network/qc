@@ -130,6 +130,7 @@ struct IRGlobal {
     // For string literals / compound init
     std::string stringInit;
     bool        hasStringInit = false;
+    std::vector<std::string> symbolInits; // NEW
     u32         align         = 0;
 };
 

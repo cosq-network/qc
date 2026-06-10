@@ -224,6 +224,7 @@ private:
         std::vector<u8> initData;
         std::string stringInit;
         bool hasStringInit = false;
+        std::vector<std::string> symbolInits; // NEW
         bool isZeroInit    = false;
         bool isConst       = false;
         bool isExtern      = false;
@@ -1448,6 +1449,7 @@ void X64CodeGen::compileGlobal(const IRGlobal& g) {
     go.initData      = g.initData;
     go.stringInit    = g.stringInit;
     go.hasStringInit = g.hasStringInit;
+    go.symbolInits   = g.symbolInits;
     go.isZeroInit    = g.isZeroInit;
     go.isConst       = g.isConst;
     go.isExtern      = g.isExtern;
@@ -1509,7 +1511,7 @@ void X64CodeGen::emitAssembly(FILE* out) {
     // .rodata
     bool hasRodata = false;
     for (auto& g : globOutputs_) {
-        if (g.isConst && !g.isZeroInit && (!g.initData.empty() || g.hasStringInit)) {
+        if (g.isConst && !g.isZeroInit && (!g.initData.empty() || g.hasStringInit || !g.symbolInits.empty())) {
             if (!hasRodata) { fprintf(out, "\nsection .rodata\n"); hasRodata = true; }
             fprintf(out, "global %s\n", g.name.c_str());
             fprintf(out, "%s:\n", g.name.c_str());
@@ -1517,6 +1519,10 @@ void X64CodeGen::emitAssembly(FILE* out) {
                 fprintf(out, "    db ");
                 for (char c : g.stringInit) fprintf(out, "%d,", (unsigned char)c);
                 fprintf(out, "0\n");
+            } else if (!g.symbolInits.empty()) {
+                for (const auto& sym : g.symbolInits) {
+                    fprintf(out, "    dq %s\n", sym.c_str());
+                }
             } else {
                 fprintf(out, "    db ");
                 for (size_t i = 0; i < g.initData.size(); ++i)

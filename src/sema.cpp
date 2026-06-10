@@ -514,16 +514,42 @@ void Sema::analyseExpr(Expr* e) {
         if (ne->allocType && !ne->type) {
             ne->type = types_.ptrTo(ne->allocType);
         }
-        if (ne->initializer) analyseExpr(ne->initializer.get());
+        for (auto& a : ne->args) analyseExpr(a.get());
         for (auto& p : ne->placement) analyseExpr(p.get());
+
+        Type* base = stripQuals(ne->allocType.get());
+        if (base->isRecord()) {
+            auto* rt = static_cast<RecordType*>(base);
+            // Search for member operator new if no placement args (standard new)
+            if (ne->placement.empty()) {
+                ne->opNew = rt->findOperatorNew();
+            }
+            
+            // Resolve constructor
+            if (!ne->isArray) {
+                std::vector<TypePtr> argTypes;
+                for (auto& a : ne->args) {
+                    if (a->type) argTypes.push_back(a->type);
+                    else argTypes.push_back(types_.intTy()); // fallback
+                }
+                ne->constructor = rt->findConstructor(argTypes);
+            }
+        }
         break;
     }
     case ExprKind::Delete: {
         auto* de = static_cast<DeleteExpr*>(e);
         if (de->operand) analyseExpr(de->operand.get());
         if (de->operand && de->operand->type) {
-            Type* bt = stripQuals(de->operand->type.get());
-            if (!bt || bt->kind() != TypeKind::Pointer) {
+            Type* pt = stripQuals(de->operand->type.get());
+            if (pt && pt->kind() == TypeKind::Pointer) {
+                Type* base = stripQuals(static_cast<PointerType*>(pt)->pointee());
+                if (base->isRecord()) {
+                    auto* rt = static_cast<RecordType*>(base);
+                    de->opDelete = rt->findOperatorDelete();
+                    de->destructor = rt->findDestructor();
+                }
+            } else {
                 diag_.error(e->loc, "delete requires pointer operand");
             }
         }

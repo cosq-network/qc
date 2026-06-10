@@ -156,14 +156,22 @@ struct AlignofExpr : Expr {
 struct NewExpr : Expr {
     TypePtr              allocType;
     std::vector<ExprPtr> placement;
-    ExprPtr              initializer; // may be null
+    std::vector<ExprPtr> args;
     bool                 isArray;
+
+    const MethodInfo*    opNew = nullptr;
+    const MethodInfo*    constructor = nullptr;
+
     ExprKind kind() const override { return ExprKind::New; }
 };
 
 struct DeleteExpr : Expr {
     ExprPtr operand;
     bool    isArray;
+
+    const MethodInfo*    opDelete = nullptr;
+    const MethodInfo*    destructor = nullptr;
+
     ExprKind kind() const override { return ExprKind::Delete; }
 };
 
@@ -375,7 +383,7 @@ struct FuncDecl : Decl {
 struct RecordDecl : Decl {
     std::vector<DeclPtr>    members;
     Ref<RecordType>         recordType;
-    std::vector<RecordDecl*> bases;    // base classes
+    Ref<RecordType>         baseClass;
     DeclKind kind() const override {
         if (name.empty()) return DeclKind::Struct;
         return DeclKind::Struct; // refined by RecordType::kind()

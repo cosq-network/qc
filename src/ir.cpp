@@ -602,6 +602,15 @@ void dumpModule(const IRModule& mod, FILE* out) {
                 g.isConst ? "" : "",
                 g.stringInit.size() + 1,
                 g.stringInit.c_str());
+        } else if (!g.symbolInits.empty()) {
+            std::fprintf(out, "@%s = %sconstant %s [",
+                g.name.c_str(),
+                g.isConst ? "" : "",
+                g.type ? typeStr(g.type.get()).c_str() : "?");
+            for (size_t i = 0; i < g.symbolInits.size(); ++i) {
+                std::fprintf(out, "%sptr @%s", (i ? ", " : ""), g.symbolInits[i].c_str());
+            }
+            std::fprintf(out, "]\n");
         } else if (g.isZeroInit || g.initData.empty()) {
             std::fprintf(out, "@%s = %sglobal %s zeroinitializer\n",
                 g.name.c_str(),

@@ -190,6 +190,7 @@ private:
         std::vector<u8> initData;
         std::string stringInit;
         bool hasStringInit = false;
+        std::vector<std::string> symbolInits; // NEW
         bool isZeroInit    = false;
         bool isConst       = false;
         bool isExtern      = false;
@@ -547,9 +548,14 @@ void ARM64CodeGen::emitCall(const IRInstr& ins, ARM64FuncCtx& ctx) {
             ctx.emitInst("mov " + std::string(xRegName((u32)(i - 1))) + ", " + xRegName(r));
     }
 
-    std::string sym = ins.srcs[0].name;
-    if (isMachO_) sym = "_" + sym;
-    ctx.emitInst("bl " + sym);
+    if (ins.srcs[0].kind == IRValueKind::Global) {
+        std::string sym = ins.srcs[0].name;
+        if (isMachO_) sym = "_" + sym;
+        ctx.emitInst("bl " + sym);
+    } else {
+        u32 fnReg = loadGPR(ins.srcs[0], ctx, REG_X9);
+        ctx.emitInst("blr " + std::string(xRegName(fnReg)));
+    }
 
     if (ins.dst.kind == IRValueKind::Register) {
         ctx.emitInst("str x0, " + spOff(ctx.spillSlots[ins.dst.id]));
@@ -583,6 +589,7 @@ void ARM64CodeGen::compileGlobal(const IRGlobal& g) {
     go.initData      = g.initData;
     go.stringInit    = g.stringInit;
     go.hasStringInit = g.hasStringInit;
+    go.symbolInits   = g.symbolInits;
     go.isZeroInit    = g.isZeroInit;
     go.isConst       = g.isConst;
     go.isExtern      = g.isExtern;
@@ -652,7 +659,7 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
     // .rodata
     bool hasRodata = false;
     for (auto& g : globOutputs_) {
-        if (g.isConst && !g.isZeroInit && (!g.initData.empty() || g.hasStringInit)) {
+        if (g.isConst && !g.isZeroInit && (!g.initData.empty() || g.hasStringInit || !g.symbolInits.empty())) {
             if (!hasRodata) {
                 if (isMachO_) fprintf(out, "\n.section __TEXT,__const\n");
                 else          fprintf(out, "\n.section .rodata\n");
@@ -665,6 +672,12 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
                 std::string s = g.stringInit;
                 if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
                 fprintf(out, "    .ascii \"%s\"\n    .byte 0\n", s.c_str());
+            } else if (!g.symbolInits.empty()) {
+                for (const auto& sym : g.symbolInits) {
+                    std::string s = sym;
+                    if (isMachO_) s = "_" + s;
+                    fprintf(out, "    .quad %s\n", s.c_str());
+                }
             } else {
                 fprintf(out, "    .byte");
                 for (size_t i = 0; i < g.initData.size(); ++i)

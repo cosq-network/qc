@@ -50,6 +50,9 @@ private:
     IRValue genSizeof(const SizeofExpr* e);
     IRValue genAlignof(const AlignofExpr* e);
     IRValue genAssign(const AssignExpr* e);
+    IRValue genNewExpr(const NewExpr* e);
+    IRValue genDeleteExpr(const DeleteExpr* e);
+    void    genVTable(RecordType* rt);
     IRValue genInitList(const InitListExpr* e, IRValue dest);
 
     // --- Helpers ---

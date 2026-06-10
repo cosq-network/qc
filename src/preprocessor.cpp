@@ -2,6 +2,7 @@
 #include <cassert>
 #include <fstream>
 #include <filesystem>
+#include <functional>
 
 namespace qc {
 
@@ -131,9 +132,37 @@ void Preprocessor::handleDirective(Token hashTok) {
             condStack_.push_back({cond, cond});
         }
         skipLine(line);
+    } else if (dir.text == "if") {
+        bool cond = evaluateExpression(line);
+        if (isSkipping()) {
+            condStack_.push_back({false, true});
+        } else {
+            condStack_.push_back({cond, cond});
+        }
+        skipLine(line);
+    } else if (dir.text == "elif") {
+        if (condStack_.empty()) {
+            diag_.error(dir.loc, "#elif without #if");
+            skipLine(line);
+            return;
+        }
+        CondState& c = condStack_.back();
+        bool cond = evaluateExpression(line);
+        if (c.wasTrue) {
+            c.isTrue = false;
+        } else {
+            bool parentSkipping = (condStack_.size() > 1 && !condStack_[condStack_.size() - 2].isTrue);
+            if (parentSkipping) {
+                c.isTrue = false;
+            } else {
+                c.isTrue = cond;
+                if (cond) c.wasTrue = true;
+            }
+        }
+        skipLine(line);
     } else if (dir.text == "else") {
         if (condStack_.empty()) {
-            diag_.error(dir.loc, "#else without #ifdef");
+            diag_.error(dir.loc, "#else without #if");
             skipLine(line);
             return;
         }
@@ -147,7 +176,7 @@ void Preprocessor::handleDirective(Token hashTok) {
         skipLine(line);
     } else if (dir.text == "endif") {
         if (condStack_.empty()) {
-            diag_.error(dir.loc, "#endif without #ifdef");
+            diag_.error(dir.loc, "#endif without #if");
             skipLine(line);
             return;
         }
@@ -208,6 +237,107 @@ void Preprocessor::handleDirective(Token hashTok) {
         // unsupported directive
         skipLine(line);
     }
+}
+
+bool Preprocessor::evaluateExpression(u32 line) {
+    // Collect tokens for this line
+    std::vector<Token> tokens;
+    while (true) {
+        Token t = currentLexer()->peek();
+        if (t.is(TokenKind::Eof) || t.loc.line > line) break;
+        tokens.push_back(currentLexer()->next());
+    }
+
+    if (tokens.empty()) return false;
+
+    // Simple recursive descent-ish evaluator for:
+    // expr   ::= logical_or
+    // logical_or  ::= logical_and { "||" logical_and }
+    // logical_and ::= unary { "&&" unary }
+    // unary       ::= "!" unary | primary
+    // primary     ::= "defined" "(" ID ")" | "defined" ID | ID | INT | "(" expr ")"
+
+    size_t pos = 0;
+    auto peek = [&]() -> Token { 
+        if (pos < tokens.size()) return tokens[pos];
+        return Token{TokenKind::Eof};
+    };
+    auto consume = [&]() -> Token {
+        if (pos < tokens.size()) return tokens[pos++];
+        return Token{TokenKind::Eof};
+    };
+
+    std::function<bool()> parseExpr;
+    std::function<bool()> parseLogicalOr;
+    std::function<bool()> parseLogicalAnd;
+    std::function<bool()> parseUnary;
+    std::function<bool()> parsePrimary;
+
+    parsePrimary = [&]() -> bool {
+        Token t = consume();
+        if (t.is(TokenKind::LParen)) {
+            bool res = parseExpr();
+            if (peek().is(TokenKind::RParen)) consume();
+            return res;
+        }
+        if (t.is(TokenKind::IntLit)) {
+            return std::stoll(t.text) != 0;
+        }
+        if (t.is(TokenKind::Identifier)) {
+            if (t.text == "defined") {
+                Token nt = peek();
+                bool hasParen = false;
+                if (nt.is(TokenKind::LParen)) {
+                    hasParen = true;
+                    consume();
+                    nt = peek();
+                }
+                bool res = false;
+                if (nt.is(TokenKind::Identifier)) {
+                    res = (macros_.count(nt.text) > 0);
+                    consume();
+                }
+                if (hasParen && peek().is(TokenKind::RParen)) consume();
+                return res;
+            }
+            // Standard: identifiers not matching defined or macros are 0
+            // For now, let's just check if it's a known macro
+            return (macros_.count(t.text) > 0);
+        }
+        return false;
+    };
+
+    parseUnary = [&]() -> bool {
+        if (peek().is(TokenKind::Bang)) {
+            consume();
+            return !parseUnary();
+        }
+        return parsePrimary();
+    };
+
+    parseLogicalAnd = [&]() -> bool {
+        bool left = parseUnary();
+        while (peek().is(TokenKind::AmpAmp)) {
+            consume();
+            bool right = parseUnary();
+            left = left && right;
+        }
+        return left;
+    };
+
+    parseLogicalOr = [&]() -> bool {
+        bool left = parseLogicalAnd();
+        while (peek().is(TokenKind::PipePipe)) {
+            consume();
+            bool right = parseLogicalAnd();
+            left = left || right;
+        }
+        return left;
+    };
+
+    parseExpr = parseLogicalOr;
+
+    return parseExpr();
 }
 
 } // namespace qc

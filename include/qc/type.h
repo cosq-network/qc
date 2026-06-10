@@ -49,16 +49,27 @@ public:
     virtual u32      align() const = 0; // bytes
     virtual std::string toString() const = 0;
 
+    bool isRecord() const {
+        TypeKind k = kind();
+        return k == TypeKind::Struct || k == TypeKind::Union || k == TypeKind::Class;
+    }
+    bool isStruct() const { return isRecord(); }
+
+    bool isPointer() const {
+        return kind() == TypeKind::Pointer;
+    }
+
+    bool isFunction() const {
+        return kind() == TypeKind::Function;
+    }
+
     bool isVoid()     const { return kind() == TypeKind::Void; }
     bool isInteger()  const;
-    bool isSigned()   const;
-    bool isFloat()    const;
-    bool isPointer()  const { return kind() == TypeKind::Pointer; }
     bool isArray()    const { return kind() == TypeKind::Array || kind() == TypeKind::IncompleteArray; }
-    bool isFunction() const { return kind() == TypeKind::Function; }
-    bool isStruct()   const { return kind() == TypeKind::Struct || kind() == TypeKind::Union || kind() == TypeKind::Class; }
     bool isArithmetic() const { return isInteger() || isFloat(); }
     bool isScalar()   const { return isArithmetic() || isPointer() || kind() == TypeKind::NullptrT || kind() == TypeKind::Enum; }
+    bool isFloat()    const;
+    bool isSigned()   const;
 
     const QualFlags& quals() const { return quals_; }
     void setQuals(QualFlags q) { quals_ = q; }
@@ -152,6 +163,7 @@ struct MethodInfo {
     TypePtr     type; // FunctionType
     class RecordType* parent = nullptr;
     bool        isStatic = false;
+    bool        isVirtual = false;
     bool        isConstructor = false;
     bool        isDestructor = false;
 };
@@ -171,6 +183,9 @@ public:
     const std::vector<MethodInfo>& methods() const { return methods_; }
     bool isComplete() const { return complete_; }
 
+    void setBaseClass(Ref<RecordType> base);
+    RecordType* baseClass() const { return base_.get(); }
+
     void addField(FieldInfo f);
     void addMethod(MethodInfo m);
     void finalize();
@@ -179,12 +194,22 @@ public:
 
     const MethodInfo* findConstructor(const std::vector<TypePtr>& argTypes) const;
     const MethodInfo* findDestructor() const;
+    const MethodInfo* findOperatorNew() const;
+    const MethodInfo* findOperatorDelete() const;
+
+    struct VirtualMethod {
+        const MethodInfo* method;
+        int               vtableIndex;
+    };
+    const std::vector<VirtualMethod>& vtable() const { return vtable_; }
 
 private:
     TypeKind            kind_;
     std::string         name_;
+    Ref<RecordType>     base_;
     std::vector<FieldInfo> fields_;
     std::vector<MethodInfo> methods_;
+    std::vector<VirtualMethod> vtable_;
     u32                 size_   = 0;
     u32                 align_  = 1;
     bool                complete_ = false;

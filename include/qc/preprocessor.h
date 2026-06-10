@@ -34,6 +34,7 @@ private:
     Token lexRaw();
     void handleDirective(Token hashTok);
     void skipLine(u32 line);
+    bool evaluateExpression(u32 line);
 
     Lexer* currentLexer();
 

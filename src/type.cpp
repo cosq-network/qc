@@ -157,6 +157,21 @@ std::string RecordType::toString() const {
     return prefix + name_;
 }
 
+void RecordType::setBaseClass(Ref<RecordType> base) {
+    base_ = std::move(base);
+    if (base_ && kind_ != TypeKind::Union) {
+        // Inherit fields immediately to set correct starting offset for new fields
+        for (const auto& f : base_->fields()) {
+            // We bypass addField logic and just copy because base is already laid out
+            fields_.push_back(f);
+            size_  = std::max(size_, f.offset + (f.type ? f.type->size() : 0));
+            align_ = std::max(align_, f.type ? f.type->align() : 1);
+        }
+        // Inherit VTable
+        vtable_ = base_->vtable();
+    }
+}
+
 void RecordType::addField(FieldInfo f) {
     u32 fieldAlign = f.type ? f.type->align() : 1;
     if (fieldAlign < 1) fieldAlign = 1;
@@ -198,7 +213,54 @@ void RecordType::finalize() {
             if (fsz > maxSz) maxSz = fsz;
         }
         size_ = maxSz;
+    } else {
+        // C++: Handle virtual functions
+        bool hasVirtual = !vtable_.empty();
+        for (const auto& m : methods_) if (m.isVirtual) hasVirtual = true;
+
+        if (hasVirtual) {
+            bool hasBaseVptr = false;
+            if (base_) {
+                for (const auto& f : base_->fields()) if (f.name == "_vptr") hasBaseVptr = true;
+            }
+
+            if (!hasBaseVptr) {
+                // Prepend _vptr field
+                FieldInfo vptr;
+                vptr.name = "_vptr";
+                // Hack: use void* for _vptr
+                vptr.type = std::make_shared<PointerType>(std::make_shared<BuiltinType>(TypeKind::Void));
+                
+                // Shift all existing fields!
+                u32 ptrSize = vptr.type->size();
+                u32 ptrAlign = vptr.type->align();
+                
+                vptr.offset = 0;
+                for (auto& f : fields_) f.offset += ptrSize;
+                fields_.insert(fields_.begin(), vptr);
+                
+                size_ += ptrSize;
+                if (ptrAlign > align_) align_ = ptrAlign;
+            }
+
+            // Update VTable
+            for (const auto& m : methods_) {
+                if (!m.isVirtual) continue;
+                bool overridden = false;
+                for (auto& ve : vtable_) {
+                    if (ve.method->name == m.name) {
+                        ve.method = &m;
+                        overridden = true;
+                        break;
+                    }
+                }
+                if (!overridden) {
+                    vtable_.push_back({&m, (int)vtable_.size()});
+                }
+            }
+        }
     }
+
     // Pad struct to its alignment boundary
     if (align_ > 0 && size_ % align_ != 0) {
         size_ += align_ - (size_ % align_);
@@ -237,6 +299,20 @@ const MethodInfo* RecordType::findConstructor(const std::vector<TypePtr>& argTyp
 const MethodInfo* RecordType::findDestructor() const {
     for (const auto& m : methods_) {
         if (m.isDestructor) return &m;
+    }
+    return nullptr;
+}
+
+const MethodInfo* RecordType::findOperatorNew() const {
+    for (const auto& m : methods_) {
+        if (m.name == "operator new") return &m;
+    }
+    return nullptr;
+}
+
+const MethodInfo* RecordType::findOperatorDelete() const {
+    for (const auto& m : methods_) {
+        if (m.name == "operator delete") return &m;
     }
     return nullptr;
 }

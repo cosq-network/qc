@@ -569,14 +569,9 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
 
     // Optional grouped declarator: (*name) or (&name)
     if (cur().is(TokenKind::LParen)) {
-        // Check if this is a grouped declarator (contains *, &, name)
-        // We do a lookahead heuristic: if after '(' we see *, &, identifier
-        Token after = pp_.peek(); // peek again? Actually cur() is already peek
-        // We need to look one more ahead
-        // Simple heuristic: if next after '(' is *, &, identifier that's not a type, it's grouped
-        next(); // consume '('
-        if (cur().is(TokenKind::Star) || cur().is(TokenKind::Amp) || cur().is(TokenKind::AmpAmp)) {
-            // Grouped declarator like (*name)
+        Token nextT = peek();
+        if (nextT.is(TokenKind::Star) || nextT.is(TokenKind::Amp) || nextT.is(TokenKind::AmpAmp)) {
+            next(); // consume '('
             TypePtr innerType = parsePointerSuffix(type);
             if (cur().is(TokenKind::Identifier)) {
                 nameOut = cur().text;
@@ -590,60 +585,9 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
                 type = parseFunctionSuffix(type, nameOut);
             }
             return type;
-        } else {
-            // This was a function call suffix or parameter list — put it back conceptually
-            // Actually we consumed '(', now we need to parse parameter list
-            // This is a function type: base(params)
-            std::vector<ParamInfo> params;
-            bool variadic = false;
-            if (!cur().is(TokenKind::RParen)) {
-                // Parse parameters
-                while (!atEnd() && !cur().is(TokenKind::RParen)) {
-                    if (cur().is(TokenKind::Ellipsis)) {
-                        variadic = true;
-                        next();
-                        break;
-                    }
-                    if (!params.empty()) {
-                        if (!match(TokenKind::Comma)) break;
-                        if (cur().is(TokenKind::Ellipsis)) {
-                            variadic = true;
-                            next();
-                            break;
-                        }
-                    }
-                    // Check for void parameter list: (void)
-                    if (cur().is(TokenKind::Kw_void) && (pp_.peek().is(TokenKind::RParen))) {
-                        next(); // consume void
-                        break;
-                    }
-                    DeclSpec pds = parseDeclSpec();
-                    std::string pname;
-                    TypePtr ptype = parseDeclarator(pds.baseType, pname);
-                    ParamInfo pi;
-                    pi.name = pname;
-                    pi.type = ptype;
-                    params.push_back(std::move(pi));
-                }
-            }
-            consume(TokenKind::RParen, "expected ')'");
-            // Skip cv-qualifiers on member function (const, volatile, noexcept, override, final)
-            while (cur().is(TokenKind::Kw_const) || cur().is(TokenKind::Kw_volatile)
-                || cur().is(TokenKind::Kw_noexcept) || cur().is(TokenKind::Kw_override)
-                || cur().is(TokenKind::Kw_final)) {
-                next();
-            }
-            // Skip -> trailing return type
-            if (cur().is(TokenKind::Arrow)) {
-                next();
-                DeclSpec rds = parseDeclSpec();
-                std::string ignored2;
-                parseDeclarator(rds.baseType, ignored2);
-            }
-            type = types_.makeFn(type, std::move(params), variadic);
-            return type;
         }
     }
+
     // Name
     if (cur().is(TokenKind::Identifier)) {
         nameOut = cur().text;
@@ -655,6 +599,33 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
             if (cur().is(TokenKind::Identifier)) {
                 nameOut += cur().text;
                 next();
+            } else if (cur().is(TokenKind::Tilde)) {
+                next();
+                if (cur().is(TokenKind::Identifier)) {
+                    nameOut += "~" + cur().text;
+                    next();
+                }
+            } else if (cur().is(TokenKind::Kw_operator)) {
+                next();
+                if (cur().is(TokenKind::Kw_new)) {
+                    next();
+                    if (cur().is(TokenKind::LBracket)) {
+                        next();
+                        consume(TokenKind::RBracket, "expected ']'");
+                        nameOut += "operator new[]";
+                    } else {
+                        nameOut += "operator new";
+                    }
+                } else if (cur().is(TokenKind::Kw_delete)) {
+                    next();
+                    if (cur().is(TokenKind::LBracket)) {
+                        next();
+                        consume(TokenKind::RBracket, "expected ']'");
+                        nameOut += "operator delete[]";
+                    } else {
+                        nameOut += "operator delete";
+                    }
+                }
             }
         }
 
@@ -674,6 +645,37 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
                 }
                 else next();
             }
+        }
+    } else if (cur().is(TokenKind::Tilde)) {
+        next();
+        if (cur().is(TokenKind::Identifier)) {
+            nameOut = "~" + cur().text;
+            next();
+        }
+    } else if (cur().is(TokenKind::Kw_operator)) {
+        next();
+        if (cur().is(TokenKind::Kw_new)) {
+            next();
+            if (cur().is(TokenKind::LBracket)) {
+                next();
+                consume(TokenKind::RBracket, "expected ']'");
+                nameOut = "operator new[]";
+            } else {
+                nameOut = "operator new";
+            }
+        } else if (cur().is(TokenKind::Kw_delete)) {
+            next();
+            if (cur().is(TokenKind::LBracket)) {
+                next();
+                consume(TokenKind::RBracket, "expected ']'");
+                nameOut = "operator delete[]";
+            } else {
+                nameOut = "operator delete";
+            }
+        } else {
+            // Other operators (crude)
+            nameOut = "operator" + cur().text;
+            next();
         }
     } else if (cur().is(TokenKind::ColonColon)) {
         // ::name
@@ -708,18 +710,13 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
                     }
                 }
                 // Check for void parameter list: (void)
-                if (cur().is(TokenKind::Kw_void) && (pp_.peek().is(TokenKind::RParen))) {
+                if (cur().is(TokenKind::Kw_void) && (peek().is(TokenKind::RParen))) {
                     next();
                     break;
                 }
                 DeclSpec pds = parseDeclSpec();
                 std::string pname;
                 TypePtr ptype = parseDeclarator(pds.baseType, pname);
-                // Optional default value
-                if (cur().is(TokenKind::Eq)) {
-                    next();
-                    parseAssignExpr(); // discard default value for now
-                }
                 ParamInfo pi;
                 pi.name = pname;
                 pi.type = ptype;
@@ -727,10 +724,11 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
             }
         }
         consume(TokenKind::RParen, "expected ')'");
-        // Skip trailing qualifiers
+        // Skip cv-qualifiers on member function (const, volatile, noexcept, override, final)
         while (cur().is(TokenKind::Kw_const) || cur().is(TokenKind::Kw_volatile)
             || cur().is(TokenKind::Kw_noexcept) || cur().is(TokenKind::Kw_override)
             || cur().is(TokenKind::Kw_final)) {
+            if (cur().is(TokenKind::Kw_override)) lastFunctionWasOverride = true;
             next();
         }
         // Trailing return type
@@ -799,10 +797,25 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
             }
             // Skip 'virtual'
             if (cur().is(TokenKind::Kw_virtual)) next();
-            // Skip base name (possibly qualified)
+            
+            // Resolve base name
+            std::string baseName;
             while (cur().is(TokenKind::Identifier) || cur().is(TokenKind::ColonColon)) {
-                next();
+                if (cur().is(TokenKind::ColonColon)) {
+                    baseName += "::";
+                    next();
+                }
+                if (cur().is(TokenKind::Identifier)) {
+                    baseName += cur().text;
+                    next();
+                }
             }
+            
+            TypePtr baseTy = lookupTypeName(baseName);
+            if (baseTy && baseTy->isRecord()) {
+                rd->baseClass = std::static_pointer_cast<RecordType>(baseTy);
+            }
+
             // Template args
             if (cur().is(TokenKind::Lt)) {
                 next();
@@ -819,6 +832,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
 
     // Create the RecordType
     auto recType = types_.makeRecord(k, rd->name);
+    if (rd->baseClass) recType->setBaseClass(rd->baseClass);
     rd->recordType = recType;
     rd->type = recType;
 
@@ -871,6 +885,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
                 auto fd = parseFunctionDecl(emptyDS, fnType, methodName, memberLoc);
                 fd->isConstructor = !isDtor;
                 fd->isDestructor = isDtor;
+                fd->isVirtual = true; // Constructor/Destructor with virtual prefix (destructor only)
                 fd->parentRecordType = rd->recordType;
 
                 MethodInfo mi;
@@ -902,6 +917,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
                 mi.name = fd->name;
                 mi.type = fd->type;
                 mi.isStatic = fd->isStatic;
+                mi.isVirtual = fd->isVirtual;
                 mi.isConstructor = fd->isConstructor;
                 mi.isDestructor = fd->isDestructor;
                 recType->addMethod(mi);
@@ -1058,7 +1074,9 @@ Ptr<FuncDecl> Parser::parseFunctionDecl(DeclSpec& ds, TypePtr fnType, std::strin
     fd->isStatic  = ds.isStatic;
     fd->isInline  = ds.isInline;
     fd->isConstexpr = ds.isConstexpr;
-    fd->isVirtual = ds.isVirtual;
+    fd->isVirtual = ds.isVirtual || lastFunctionWasOverride;
+    fd->isOverride = lastFunctionWasOverride;
+    lastFunctionWasOverride = false;
     fd->isNoreturn = ds.isNoreturn;
     fd->alignasExpr = std::move(ds.alignasExpr);
 
@@ -1933,32 +1951,52 @@ ExprPtr Parser::parseUnaryExpr() {
         return ae;
     }
     case TokenKind::Kw_new: {
+        // std::fprintf(stderr, "DEBUG: Parsing new at %u:%u\n", loc.line, loc.column);
         next();
         auto ne = make<NewExpr>();
         ne->loc = loc;
         ne->isArray = false;
         // Placement args: new (args) Type
         if (cur().is(TokenKind::LParen)) {
-            next();
-            if (!cur().is(TokenKind::RParen)) {
-                // Could be placement or type — check for type
-                Token inner = pp_.peek();
-                // If it starts with a type keyword, it's a type in parens (grouped)
-                // Otherwise it's placement args
-                ne->placement = parseArgList();
+            // Peek inside to see if it's a type or placement args
+            Token inner = peek();
+            bool isType = false;
+            switch (inner.kind) {
+            case TokenKind::Kw_char: case TokenKind::Kw_short: case TokenKind::Kw_int:
+            case TokenKind::Kw_long: case TokenKind::Kw_float: case TokenKind::Kw_double:
+            case TokenKind::Kw_void: case TokenKind::Kw_unsigned: case TokenKind::Kw_signed:
+            case TokenKind::Kw__Bool: case TokenKind::Kw_bool: case TokenKind::Kw_struct:
+            case TokenKind::Kw_union: case TokenKind::Kw_class: case TokenKind::Kw_enum:
+            case TokenKind::Kw_const: case TokenKind::Kw_volatile:
+                isType = true; break;
+            case TokenKind::Identifier:
+                isType = isTypeName(inner); break;
+            default: break;
             }
-            consume(TokenKind::RParen, "expected ')'");
+
+            if (!isType) {
+                next(); // consume '('
+                if (!cur().is(TokenKind::RParen)) {
+                    ne->placement = parseArgList();
+                }
+                consume(TokenKind::RParen, "expected ')'");
+            }
+            // If it IS a type, we leave the '(' for parseDeclSpec/parseDeclarator
         }
         // Parse type
         DeclSpec nds = parseDeclSpec();
-        std::string ignored;
-        ne->allocType = parseDeclarator(nds.baseType, ignored);
+        // C++: for new, we only want the type part, not a function declarator
+        // type-id is base type + pointer/ref suffixes
+        ne->allocType = parsePointerSuffix(nds.baseType);
+
         // Array new
+
         if (cur().is(TokenKind::LBracket)) {
             ne->isArray = true;
             next();
             if (!cur().is(TokenKind::RBracket)) {
-                ne->initializer = parseExpr();
+                // For now, let's put the array size in args[0]
+                ne->args.push_back(parseExpr());
             }
             consume(TokenKind::RBracket, "expected ']'");
         }
@@ -1966,11 +2004,14 @@ ExprPtr Parser::parseUnaryExpr() {
         if (cur().is(TokenKind::LParen)) {
             next();
             if (!cur().is(TokenKind::RParen)) {
-                ne->initializer = parseExpr();
+                ne->args = parseArgList();
             }
             consume(TokenKind::RParen, "expected ')'");
-        } else if (cur().is(TokenKind::LBrace)) {
-            ne->initializer = parseInitListExpr();
+        }
+ else if (cur().is(TokenKind::LBrace)) {
+            // ne->args.push_back(parseInitListExpr()); 
+            // for now, just skip
+            parseInitListExpr();
         }
         if (ne->allocType) {
             ne->type = types_.ptrTo(ne->allocType);
