@@ -51,27 +51,27 @@ static const char* dRegName(u32 r) {
     return (r < 32) ? names[r] : "??";
 }
 
-static constexpr u32 REG_X8  = 8;   // indirect result / scratch
+// static constexpr u32 REG_X8  = 8;   // indirect result / scratch
 static constexpr u32 REG_X9  = 9;   // scratch
 static constexpr u32 REG_X10 = 10;  // scratch
 static constexpr u32 REG_X11 = 11;  // scratch
-static constexpr u32 REG_X12 = 12;  // scratch
+// static constexpr u32 REG_X12 = 12;  // scratch
 static constexpr u32 REG_V0  = 32;  // FP regs start at 32
 static constexpr u32 REG_V8  = 32 + 8;
 
 // Callee-saved integer regs (x19-x28) — x29/x30 handled by frame
-static const u32 kCalleeGPR[] = { 19,20,21,22,23,24,25,26,27,28 };
-static constexpr u32 kNumCalleeGPR = 10;
+[[maybe_unused]] static const u32 kCalleeGPR[] = { 19,20,21,22,23,24,25,26,27,28 };
+[[maybe_unused]] static constexpr u32 kNumCalleeGPR = 10;
 
 // Callee-saved FP regs v8-v15
-static const u32 kCalleeFPR[] = { REG_V8,REG_V8+1,REG_V8+2,REG_V8+3,
+[[maybe_unused]] static const u32 kCalleeFPR[] = { REG_V8,REG_V8+1,REG_V8+2,REG_V8+3,
                                     REG_V8+4,REG_V8+5,REG_V8+6,REG_V8+7 };
-static constexpr u32 kNumCalleeFPR = 8;
+[[maybe_unused]] static constexpr u32 kNumCalleeFPR = 8;
 
 // ---------------------------------------------------------------------------
 // Type helpers
 // ---------------------------------------------------------------------------
-static bool typeIsFloat(const Type* t) {
+[[maybe_unused]] static bool typeIsFloat(const Type* t) {
     if (!t) return false;
     switch (t->kind()) {
         case TypeKind::Float:
@@ -201,7 +201,7 @@ private:
     std::vector<GlobOutput> globOutputs_;
 
     TargetInfo  target_;
-    DiagEngine& diag_;
+    [[maybe_unused]] DiagEngine& diag_;
     bool        debugEnabled_ = false;
     bool        isMachO_      = false;
 

@@ -1204,7 +1204,6 @@ TypePtr Sema::usualArithmeticConv(TypePtr a, TypePtr b) {
     }
 
     // Different signedness
-    TypeKind uKind  = ua ? ka : kb;
     TypeKind sKind  = ua ? kb : ka;
     int uRank = ua ? ra : rb;
     int sRank = ua ? rb : ra;

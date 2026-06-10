@@ -66,7 +66,7 @@ static constexpr u32 REG_RAX = 0;
 static constexpr u32 REG_RCX = 1;
 static constexpr u32 REG_RDX = 2;
 static constexpr u32 REG_RBX = 3;
-static constexpr u32 REG_RSP = 4;
+[[maybe_unused]] static constexpr u32 REG_RSP = 4;
 static constexpr u32 REG_RBP = 5;
 static constexpr u32 REG_RSI = 6;
 static constexpr u32 REG_RDI = 7;
@@ -235,7 +235,7 @@ private:
     std::vector<GlobOutput> globOutputs_;
 
     TargetInfo  target_;
-    DiagEngine& diag_;
+    [[maybe_unused]] DiagEngine& diag_;
     bool        debugEnabled_ = false;
 
 public:
@@ -1386,10 +1386,8 @@ void X64CodeGen::emitCast(const IRInstr& ins, X64FuncCtx& ctx) {
         }
         case IROpcode::UIToFP: {
             u32 xmmDst = 16;
-            bool dstIsXmm2 = false;
             if (ins.dst.isReg() && ctx.virToPhys.count(ins.dst.id) && isXmm(ctx.virToPhys[ins.dst.id])) {
                 xmmDst = ctx.virToPhys[ins.dst.id];
-                dstIsXmm2 = true;
             }
             ctx.emitInst("cvtsi2sd " + std::string(xmmName(xmmDst)) + ", " + gprName64(srcPhys));
             if (dstSpill && ins.dst.isReg() && ctx.spillSlots.count(ins.dst.id))
@@ -1646,8 +1644,8 @@ static void appendBytes(std::vector<u8>& v, const void* data, size_t n) {
     const u8* p = reinterpret_cast<const u8*>(data);
     v.insert(v.end(), p, p + n);
 }
-static void appendU32LE(std::vector<u8>& v, u32 x) { appendBytes(v, &x, 4); }
-static void appendU64LE(std::vector<u8>& v, u64 x) { appendBytes(v, &x, 8); }
+[[maybe_unused]] static void appendU32LE(std::vector<u8>& v, u32 x) { appendBytes(v, &x, 4); }
+[[maybe_unused]] static void appendU64LE(std::vector<u8>& v, u64 x) { appendBytes(v, &x, 8); }
 
 // ---------------------------------------------------------------------------
 // emitObject — ELF or PE/COFF relocatable object

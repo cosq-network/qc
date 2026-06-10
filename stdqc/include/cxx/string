@@ -1,0 +1,138 @@
+#ifndef STDQC_STRING_H
+#define STDQC_STRING_H
+
+#include <cstddef>
+#include <string.h>
+#include <utility>
+#include <algorithm>
+
+namespace std {
+
+template<typename CharT>
+class basic_string {
+public:
+    using size_type = size_t;
+    static const size_type npos = static_cast<size_type>(-1);
+
+    basic_string() : data_(nullptr), size_(0), capacity_(0) {
+        assign("", 0);
+    }
+
+    basic_string(const CharT* s) : data_(nullptr), size_(0), capacity_(0) {
+        size_type len = 0;
+        const CharT* p = s;
+        while (*p++) len++;
+        assign(s, len);
+    }
+
+    basic_string(const CharT* s, size_type count) : data_(nullptr), size_(0), capacity_(0) {
+        assign(s, count);
+    }
+
+    basic_string(const basic_string& other) : data_(nullptr), size_(0), capacity_(0) {
+        assign(other.data_, other.size_);
+    }
+
+    basic_string(basic_string&& other) noexcept : data_(other.data_), size_(other.size_), capacity_(other.capacity_) {
+        other.data_ = nullptr;
+        other.size_ = 0;
+        other.capacity_ = 0;
+    }
+
+    ~basic_string() {
+        if (data_) operator delete[](data_);
+    }
+
+    basic_string& operator=(const basic_string& other) {
+        if (this != &other) {
+            assign(other.data_, other.size_);
+        }
+        return *this;
+    }
+
+    basic_string& operator=(basic_string&& other) noexcept {
+        if (this != &other) {
+            if (data_) operator delete[](data_);
+            data_ = other.data_;
+            size_ = other.size_;
+            capacity_ = other.capacity_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+            other.capacity_ = 0;
+        }
+        return *this;
+    }
+
+    const CharT* c_str() const noexcept { return data_ ? data_ : (const CharT*)""; }
+    const CharT* data() const noexcept { return data_; }
+    size_type size() const noexcept { return size_; }
+    size_type length() const noexcept { return size_; }
+    bool empty() const noexcept { return size_ == 0; }
+
+    void clear() noexcept {
+        size_ = 0;
+        if (data_) data_[0] = 0;
+    }
+
+    void reserve(size_type new_cap) {
+        if (new_cap <= capacity_) return;
+        
+        CharT* new_data = static_cast<CharT*>(operator new[]((new_cap + 1) * sizeof(CharT)));
+        if (data_) {
+            for (size_type i = 0; i <= size_; ++i) new_data[i] = data_[i];
+            operator delete[](data_);
+        }
+        data_ = new_data;
+        capacity_ = new_cap;
+    }
+
+    basic_string& append(const CharT* s, size_type count) {
+        if (size_ + count > capacity_) {
+            reserve(std::max(size_ + count, capacity_ * 2));
+        }
+        for (size_type i = 0; i < count; ++i) {
+            data_[size_ + i] = s[i];
+        }
+        size_ += count;
+        data_[size_] = 0;
+        return *this;
+    }
+
+    basic_string& operator+=(const basic_string& other) {
+        return append(other.data(), other.size());
+    }
+
+    basic_string& operator+=(const CharT* s) {
+        size_type len = 0;
+        const CharT* p = s;
+        while (*p++) len++;
+        return append(s, len);
+    }
+
+    CharT& operator[](size_type pos) { return data_[pos]; }
+    const CharT& operator[](size_type pos) const { return data_[pos]; }
+
+private:
+    void assign(const CharT* s, size_type count) {
+        if (count > capacity_) {
+            if (data_) operator delete[](data_);
+            capacity_ = count;
+            data_ = static_cast<CharT*>(operator new[]((capacity_ + 1) * sizeof(CharT)));
+        }
+        for (size_type i = 0; i < count; ++i) {
+            data_[i] = s[i];
+        }
+        size_ = count;
+        if (data_) data_[size_] = 0;
+    }
+
+    CharT* data_;
+    size_type size_;
+    size_type capacity_;
+};
+
+using string = basic_string<char>;
+
+} // namespace std
+
+#endif // STDQC_STRING_H

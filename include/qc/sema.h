@@ -79,7 +79,7 @@ private:
 
     TypeContext&        types_;
     DiagEngine&         diag_;
-    const TargetInfo&   target_;
+    [[maybe_unused]] const TargetInfo& target_;
     std::vector<Scope>  scopes_;
     FuncDecl*           currentFunc_ = nullptr;
     bool                inLoop_      = false;

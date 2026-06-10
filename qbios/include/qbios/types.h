@@ -20,3 +20,10 @@ typedef signed long long   ssize_t;
 #ifndef NULL
 #define NULL ((void*)0)
 #endif
+
+// Common kernel utility macros
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+
+#ifndef offsetof
+#define offsetof(type, member) ((size_t)&((type*)0)->member)
+#endif

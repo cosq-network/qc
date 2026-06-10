@@ -70,8 +70,8 @@ private:
     struct LoopCtx { IRBlock* cont; IRBlock* brk; };
 
     TypeContext&       types_;
-    DiagEngine&        diag_;
-    const TargetInfo&  target_;
+    [[maybe_unused]] DiagEngine& diag_;
+    [[maybe_unused]] const TargetInfo& target_;
     IRModule           mod_;
     IRBuilder          builder_;
     IRFunction*        curFn_    = nullptr;

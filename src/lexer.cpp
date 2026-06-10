@@ -431,12 +431,10 @@ Token Lexer::lexNumericLiteral() {
     bool suffixUnsigned = false;
     bool suffixLong     = false;
     bool suffixLongLong = false;
-    bool suffixFloat    = false;
 
     // Float suffix: f / F / l / L
     if (isFloat) {
         if (!atEnd() && (cur() == 'f' || cur() == 'F')) {
-            suffixFloat = true;
             advance();
         } else if (!atEnd() && (cur() == 'l' || cur() == 'L')) {
             suffixLong = true;

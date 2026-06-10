@@ -18,7 +18,7 @@ static void appendBytes(std::vector<u8>& buf, const T& val) {
     buf.insert(buf.end(), p, p + sizeof(T));
 }
 
-static void padTo(std::vector<u8>& buf, size_t align) {
+[[maybe_unused]] static void padTo(std::vector<u8>& buf, size_t align) {
     if (align <= 1) return;
     while (buf.size() % align != 0)
         buf.push_back(0);
@@ -166,6 +166,7 @@ std::vector<u8> PEWriter::emit() {
 
     // String table
     u32 strTableOffset = cursor;
+    (void)strTableOffset;
     u32 strTableSize   = static_cast<u32>(stringTableData.size()) + 4; // +4 for size field
 
     // -----------------------------------------------------------------------

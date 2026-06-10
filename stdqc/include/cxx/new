@@ -1,0 +1,11 @@
+#ifndef STDQC_NEW_H
+#define STDQC_NEW_H
+
+#include <cstddef>
+
+inline void* operator new(std::size_t, void* __p) noexcept { return __p; }
+inline void* operator new[](std::size_t, void* __p) noexcept { return __p; }
+inline void  operator delete(void*, void*) noexcept {}
+inline void  operator delete[](void*, void*) noexcept {}
+
+#endif // STDQC_NEW_H

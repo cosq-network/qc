@@ -1,0 +1,27 @@
+#ifndef STDQC_ALGORITHM_H
+#define STDQC_ALGORITHM_H
+
+#include <utility>
+
+namespace std {
+
+    template<typename T>
+    constexpr void swap(T& a, T& b) noexcept {
+        T tmp = move(a);
+        a = move(b);
+        b = move(tmp);
+    }
+
+    template<typename T>
+    constexpr const T& max(const T& a, const T& b) {
+        return (a < b) ? b : a;
+    }
+
+    template<typename T>
+    constexpr const T& min(const T& a, const T& b) {
+        return (a < b) ? a : b;
+    }
+
+}
+
+#endif // STDQC_ALGORITHM_H

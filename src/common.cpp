@@ -197,6 +197,7 @@ std::string_view tokenKindName(TokenKind k) {
     case TokenKind::Kw_typename:        return "typename";
     case TokenKind::Kw_using:           return "using";
     case TokenKind::Kw_virtual:         return "virtual";
+    case TokenKind::Kw_const_cast:      return "const_cast";
     case TokenKind::Kw_xor:             return "xor";
     case TokenKind::Kw_xor_eq:          return "xor_eq";
 

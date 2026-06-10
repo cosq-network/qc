@@ -827,7 +827,6 @@ IRValue IRGen::genStringLit(const StringLitExpr* e) {
         mod_.globals.push_back(std::move(g));
     }
 
-    IRGlobal* g = mod_.findGlobal(gname);
     TypePtr ptrTy = types_.ptrTo(types_.charTy());
     return IRValue::global(ptrTy, gname);
 }

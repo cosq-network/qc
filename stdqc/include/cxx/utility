@@ -20,6 +20,23 @@ namespace std {
         return static_cast<T&&>(t);
     }
 
+    template<typename T1, typename T2>
+    struct pair {
+        T1 first;
+        T2 second;
+
+        pair() : first(), second() {}
+        pair(const T1& a, const T2& b) : first(a), second(b) {}
+
+        template<typename U1, typename U2>
+        pair(U1&& a, U2&& b) : first(std::forward<U1>(a)), second(std::forward<U2>(b)) {}
+    };
+
+    template<typename T1, typename T2>
+    pair<T1, T2> make_pair(T1 a, T2 b) {
+        return pair<T1, T2>(a, b);
+    }
+
 }
 
 #endif // STDQC_UTILITY_H
