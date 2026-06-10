@@ -157,18 +157,36 @@ std::string RecordType::toString() const {
     return prefix + name_;
 }
 
-void RecordType::setBaseClass(Ref<RecordType> base) {
-    base_ = std::move(base);
-    if (base_ && kind_ != TypeKind::Union) {
-        // Inherit fields immediately to set correct starting offset for new fields
-        for (const auto& f : base_->fields()) {
-            // We bypass addField logic and just copy because base is already laid out
-            fields_.push_back(f);
-            size_  = std::max(size_, f.offset + (f.type ? f.type->size() : 0));
-            align_ = std::max(align_, f.type ? f.type->align() : 1);
+void RecordType::addBaseClass(Ref<RecordType> base) {
+    bases_.push_back(std::move(base));
+    Ref<RecordType>& lastBase = bases_.back();
+    if (lastBase && kind_ != TypeKind::Union) {
+        // Struct: align current size to base alignment
+        u32 baseAlign = lastBase->align();
+        if (baseAlign < 1) baseAlign = 1;
+        u32 rem = size_ % baseAlign;
+        if (rem != 0) size_ += (baseAlign - rem);
+
+        u32 baseOffset = size_;
+        baseOffsets_.push_back(baseOffset);
+
+        // Inherit fields
+        for (const auto& f : lastBase->fields()) {
+            FieldInfo nf = f;
+            nf.offset += baseOffset;
+            fields_.push_back(nf);
         }
-        // Inherit VTable
-        vtable_ = base_->vtable();
+        
+        size_ += lastBase->size();
+        if (baseAlign > align_) align_ = baseAlign;
+
+        // Inherit VTables
+        for (const auto& bvt : lastBase->vtables()) {
+            VTable dvt;
+            dvt.offset = baseOffset + bvt.offset;
+            dvt.entries = bvt.entries;
+            vtables_.push_back(std::move(dvt));
+        }
     }
 }
 
@@ -200,7 +218,6 @@ void RecordType::addField(FieldInfo f) {
 }
 
 void RecordType::addMethod(MethodInfo m) {
-    m.parent = this;
     methods_.push_back(std::move(m));
 }
 
@@ -215,23 +232,21 @@ void RecordType::finalize() {
         size_ = maxSz;
     } else {
         // C++: Handle virtual functions
-        bool hasVirtual = !vtable_.empty();
+        bool hasVirtual = !vtables_.empty();
         for (const auto& m : methods_) if (m.isVirtual) hasVirtual = true;
 
         if (hasVirtual) {
             bool hasBaseVptr = false;
-            if (base_) {
-                for (const auto& f : base_->fields()) if (f.name == "_vptr") hasBaseVptr = true;
+            for (const auto& b : bases_) {
+                for (const auto& f : b->fields()) if (f.name == "_vptr") hasBaseVptr = true;
             }
 
             if (!hasBaseVptr) {
                 // Prepend _vptr field
                 FieldInfo vptr;
                 vptr.name = "_vptr";
-                // Hack: use void* for _vptr
                 vptr.type = std::make_shared<PointerType>(std::make_shared<BuiltinType>(TypeKind::Void));
                 
-                // Shift all existing fields!
                 u32 ptrSize = vptr.type->size();
                 u32 ptrAlign = vptr.type->align();
                 
@@ -241,21 +256,32 @@ void RecordType::finalize() {
                 
                 size_ += ptrSize;
                 if (ptrAlign > align_) align_ = ptrAlign;
+
+                // Shift all existing VTable offsets!
+                for (auto& vt : vtables_) vt.offset += ptrSize;
+
+                // Create primary VTable
+                VTable pvt;
+                pvt.offset = 0;
+                vtables_.insert(vtables_.begin(), pvt);
             }
 
-            // Update VTable
+            // Update VTables with overrides
             for (const auto& m : methods_) {
                 if (!m.isVirtual) continue;
                 bool overridden = false;
-                for (auto& ve : vtable_) {
-                    if (ve.method->name == m.name) {
-                        ve.method = &m;
-                        overridden = true;
-                        break;
+                for (auto& vt : vtables_) {
+                    for (auto& ve : vt.entries) {
+                        if (ve.method->name == m.name) {
+                            ve.method = &m;
+                            overridden = true;
+                            // For now we override ALL VTables that have this method
+                        }
                     }
                 }
-                if (!overridden) {
-                    vtable_.push_back({&m, (int)vtable_.size()});
+                if (!overridden && !vtables_.empty()) {
+                    // New virtual function in this class
+                    vtables_[0].entries.push_back({&m, (int)vtables_[0].entries.size()});
                 }
             }
         }

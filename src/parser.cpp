@@ -813,7 +813,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
             
             TypePtr baseTy = lookupTypeName(baseName);
             if (baseTy && baseTy->isRecord()) {
-                rd->baseClass = std::static_pointer_cast<RecordType>(baseTy);
+                rd->baseClasses.push_back(std::static_pointer_cast<RecordType>(baseTy));
             }
 
             // Template args
@@ -832,7 +832,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
 
     // Create the RecordType
     auto recType = types_.makeRecord(k, rd->name);
-    if (rd->baseClass) recType->setBaseClass(rd->baseClass);
+    for (auto& base : rd->baseClasses) recType->addBaseClass(base);
     rd->recordType = recType;
     rd->type = recType;
 
@@ -891,6 +891,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
                 MethodInfo mi;
                 mi.name = methodName;
                 mi.type = fnType;
+                mi.parent = rd->recordType;
                 mi.isConstructor = fd->isConstructor;
                 mi.isDestructor = fd->isDestructor;
                 recType->addMethod(mi);
@@ -916,8 +917,10 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
                 MethodInfo mi;
                 mi.name = fd->name;
                 mi.type = fd->type;
+                mi.parent = rd->recordType;
                 mi.isStatic = fd->isStatic;
                 mi.isVirtual = fd->isVirtual;
+                mi.isPureVirtual = fd->isPureVirtual;
                 mi.isConstructor = fd->isConstructor;
                 mi.isDestructor = fd->isDestructor;
                 recType->addMethod(mi);
@@ -1078,6 +1081,10 @@ Ptr<FuncDecl> Parser::parseFunctionDecl(DeclSpec& ds, TypePtr fnType, std::strin
     fd->isOverride = lastFunctionWasOverride;
     lastFunctionWasOverride = false;
     fd->isNoreturn = ds.isNoreturn;
+
+    if (!name.empty() && name[0] == '~') {
+        fd->isDestructor = true;
+    }
     fd->alignasExpr = std::move(ds.alignasExpr);
 
     // Build param decls from function type
@@ -1116,6 +1123,15 @@ Ptr<FuncDecl> Parser::parseFunctionDecl(DeclSpec& ds, TypePtr fnType, std::strin
             next();
         }
         fd->body = parseCompoundStmt();
+    } else if (match(TokenKind::Eq)) {
+        Token t = next();
+        if (t.is(TokenKind::IntLit) && t.text == "0") {
+            fd->isPureVirtual = true;
+            fd->isVirtual = true;
+            consume(TokenKind::Semicolon, "expected ';' after '= 0'");
+        } else {
+            diag_.error(t.loc, "expected '0' after '=' in pure virtual function declaration");
+        }
     } else {
         // Declaration only
         consume(TokenKind::Semicolon, "expected ';' after function declaration");
@@ -1951,7 +1967,6 @@ ExprPtr Parser::parseUnaryExpr() {
         return ae;
     }
     case TokenKind::Kw_new: {
-        // std::fprintf(stderr, "DEBUG: Parsing new at %u:%u\n", loc.line, loc.column);
         next();
         auto ne = make<NewExpr>();
         ne->loc = loc;

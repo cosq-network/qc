@@ -43,21 +43,30 @@ IRModule IRGen::generate(const TranslationUnit& tu) {
 }
 
 void IRGen::genVTable(RecordType* rt) {
-    if (!rt || rt->vtable().empty()) return;
+    if (!rt || rt->vtables().empty()) return;
     
-    std::string vtableName = rt->name() + "_vtable";
-    if (mod_.findGlobal(vtableName)) return;
-    
-    IRGlobal g;
-    g.name = vtableName;
-    g.isConst = true;
-    g.type = types_.arrayOf(types_.ptrTo(types_.voidTy()), (i64)rt->vtable().size());
-    
-    for (const auto& ve : rt->vtable()) {
-        g.symbolInits.push_back(mangleMethod(ve.method->parent, ve.method));
+    for (size_t i = 0; i < rt->vtables().size(); ++i) {
+        const auto& vt = rt->vtables()[i];
+        std::string vtableName = rt->name() + "_vtable";
+        if (i > 0) vtableName += std::to_string(i);
+
+        if (mod_.findGlobal(vtableName)) continue;
+        
+        IRGlobal g;
+        g.name = vtableName;
+        g.isConst = true;
+        g.type = types_.arrayOf(types_.ptrTo(types_.voidTy()), (i64)vt.entries.size());
+        
+        for (const auto& ve : vt.entries) {
+            if (ve.method->isPureVirtual) {
+                g.symbolInits.push_back("0");
+            } else {
+                g.symbolInits.push_back(mangleMethod(static_cast<const RecordType*>(ve.method->parent.get()), ve.method));
+            }
+        }
+        
+        mod_.globals.push_back(std::move(g));
     }
-    
-    mod_.globals.push_back(std::move(g));
 }
 
 
@@ -153,7 +162,7 @@ void IRGen::genVarDecl(const VarDecl* d) {
             args.push_back(genExpr(arg.get()));
         }
         
-        std::string mangledName = mangleMethod(d->constructor->parent, d->constructor);
+        std::string mangledName = mangleMethod(static_cast<const RecordType*>(d->constructor->parent.get()), d->constructor);
         IRValue callee = IRValue::global(types_.ptrTo(d->constructor->type), mangledName);
         builder_.call(types_.voidTy(), callee, std::move(args));
     }
@@ -181,6 +190,10 @@ std::string IRGen::mangle(const FuncDecl* d) {
         mi.isDestructor = d->isDestructor;
         return mangleMethod(d->parentRecordType.get(), &mi);
     }
+    if (d->name == "operator new") return "op_new";
+    if (d->name == "operator delete") return "op_delete";
+    if (d->name == "operator new[]") return "op_new_array";
+    if (d->name == "operator delete[]") return "op_delete_array";
     return d->name;
 }
 
@@ -271,8 +284,37 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
 
     pushScope();
 
+    // Call base constructors if resolved
+    if (d->isConstructor && !d->baseConstructors.empty()) {
+        // Find 'this' param register
+        u32 thisReg = 0;
+        for (const auto& p : irfn->params) {
+            if (p.name == "this") { thisReg = (u32)p.reg; break; }
+        }
+        IRValue thisVal = IRValue::reg(types_.ptrTo(d->parentRecordType), thisReg);
+
+        const std::vector<u32>& offsets = d->parentRecordType->baseOffsets();
+        for (size_t i = 0; i < d->baseConstructors.size(); ++i) {
+            const MethodInfo* baseCtor = d->baseConstructors[i];
+            std::string baseCtorName = mangleMethod(static_cast<const RecordType*>(baseCtor->parent.get()), baseCtor);
+            IRValue baseCtorVal = IRValue::global(types_.ptrTo(types_.voidTy()), baseCtorName);
+            
+            u32 offset = offsets[i];
+            IRValue basePtr;
+            if (offset == 0) {
+                basePtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(baseCtor->parent), thisVal);
+            } else {
+                IRValue offVal = IRValue::constant(types_.intTy(), (u64)offset);
+                IRValue rawPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.charTy()), thisVal);
+                IRValue adjustedPtr = builder_.gep(types_.charTy(), rawPtr, { offVal });
+                basePtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(baseCtor->parent), adjustedPtr);
+            }
+            builder_.call(types_.voidTy(), baseCtorVal, {basePtr});
+        }
+    }
+
     // Initialize _vptr for constructors
-    if (d->isConstructor && d->parentRecordType && !d->parentRecordType->vtable().empty()) {
+    if (d->isConstructor && d->parentRecordType && !d->parentRecordType->vtables().empty()) {
         // Find 'this' param register
         u32 thisReg = 0;
         for (const auto& p : irfn->params) {
@@ -280,12 +322,26 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
         }
         
         IRValue thisVal = IRValue::reg(types_.ptrTo(d->parentRecordType), thisReg);
-        std::string vtableName = d->parentRecordType->name() + "_vtable";
-        IRValue vtableAddr = IRValue::global(types_.ptrTo(types_.voidTy()), vtableName);
-        
-        TypePtr vptrPtrTy = types_.ptrTo(types_.ptrTo(types_.voidTy()));
-        IRValue vptrAddr = builder_.cast(IROpcode::Bitcast, vptrPtrTy, thisVal);
-        builder_.store(vtableAddr, vptrAddr);
+
+        for (size_t i = 0; i < d->parentRecordType->vtables().size(); ++i) {
+            const auto& vt = d->parentRecordType->vtables()[i];
+            std::string vtableName = d->parentRecordType->name() + "_vtable";
+            if (i > 0) vtableName += std::to_string(i);
+
+            IRValue vtableAddr = IRValue::global(types_.ptrTo(types_.voidTy()), vtableName);
+            
+            u32 offset = vt.offset;
+            IRValue vptrAddr;
+            if (offset == 0) {
+                vptrAddr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.ptrTo(types_.voidTy())), thisVal);
+            } else {
+                IRValue offVal = IRValue::constant(types_.intTy(), (u64)offset);
+                IRValue rawPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.charTy()), thisVal);
+                IRValue adjustedPtr = builder_.gep(types_.charTy(), rawPtr, { offVal });
+                vptrAddr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.ptrTo(types_.voidTy())), adjustedPtr);
+            }
+            builder_.store(vtableAddr, vptrAddr);
+        }
     }
 
     // For each parameter, create an alloca + store so the param is addressable.
@@ -344,7 +400,7 @@ void IRGen::emitPopScope() {
     for (int i = (int)cleanups.size() - 1; i >= 0; --i) {
         auto& c = cleanups[i];
         // Call destructor
-        std::string mangledName = mangleMethod(c.destructor->parent, c.destructor);
+        std::string mangledName = mangleMethod(static_cast<const RecordType*>(c.destructor->parent.get()), c.destructor);
         IRValue callee = IRValue::global(types_.ptrTo(c.destructor->type), mangledName);
         builder_.call(types_.voidTy(), callee, { c.thisPtr });
     }
@@ -671,7 +727,7 @@ void IRGen::genReturnStmt(const ReturnStmt* s) {
         auto& cleanups = cleanupStack_[i];
         for (int j = (int)cleanups.size() - 1; j >= 0; --j) {
             auto& c = cleanups[j];
-            std::string mangledName = mangleMethod(c.destructor->parent, c.destructor);
+            std::string mangledName = mangleMethod(static_cast<const RecordType*>(c.destructor->parent.get()), c.destructor);
             IRValue callee = IRValue::global(types_.ptrTo(c.destructor->type), mangledName);
             builder_.call(types_.voidTy(), callee, { c.thisPtr });
         }
@@ -886,9 +942,9 @@ IRValue IRGen::genNewExpr(const NewExpr* e) {
     IRValue sizeVal = IRValue::constant(types_.ulonglongTy(), size);
     
     // 2. Call operator new
-    std::string opName = "operator new";
+    std::string opName = "op_new";
     if (e->opNew) {
-        opName = mangleMethod(static_cast<const RecordType*>(e->opNew->parent), e->opNew);
+        opName = mangleMethod(static_cast<const RecordType*>(e->opNew->parent.get()), e->opNew);
     }
     
     // Ensure operator new is in module
@@ -907,7 +963,7 @@ IRValue IRGen::genNewExpr(const NewExpr* e) {
     
     // 3. Call constructor if resolved
     if (e->constructor) {
-        std::string ctorName = mangleMethod(static_cast<const RecordType*>(e->constructor->parent), e->constructor);
+        std::string ctorName = mangleMethod(static_cast<const RecordType*>(e->constructor->parent.get()), e->constructor);
         std::vector<IRValue> args;
         args.push_back(typedPtr); // 'this'
         for (const auto& arg : e->args) {
@@ -937,9 +993,9 @@ IRValue IRGen::genDeleteExpr(const DeleteExpr* e) {
     }
     
     // 2. Call operator delete
-    std::string opName = "operator delete";
+    std::string opName = "op_delete";
     if (e->opDelete) {
-        opName = mangleMethod(static_cast<const RecordType*>(e->opDelete->parent), e->opDelete);
+        opName = mangleMethod(static_cast<const RecordType*>(e->opDelete->parent.get()), e->opDelete);
     }
     
     if (!mod_.findFunction(opName)) {
@@ -1255,33 +1311,48 @@ IRValue IRGen::genCall(const CallExpr* e) {
 
 IRValue IRGen::genMemberCall(const CallExpr* e, IRValue basePtr, const MethodInfo* method) {
     if (method->isVirtual) {
-        // 1. Get _vptr (offset 0)
-        TypePtr ptrTy = types_.ptrTo(types_.ptrTo(types_.voidTy()));
-        IRValue vtablePtrAddr = builder_.cast(IROpcode::Bitcast, ptrTy, basePtr);
-        IRValue vtable = builder_.load(types_.ptrTo(types_.voidTy()), vtablePtrAddr);
-
-        // 2. Find index
+        // 1. Find which VTable contains this method
+        int vtableIdx = -1;
         int vindex = -1;
-        for (const auto& ve : method->parent->vtable()) {
-            if (ve.method->name == method->name) {
-                vindex = ve.vtableIndex;
-                break;
+        const auto& vts = static_cast<const RecordType*>(method->parent.get())->vtables();
+        for (size_t i = 0; i < vts.size(); ++i) {
+            for (const auto& ve : vts[i].entries) {
+                if (ve.method->name == method->name) {
+                    vtableIdx = (int)i;
+                    vindex = ve.vtableIndex;
+                    break;
+                }
             }
+            if (vindex >= 0) break;
         }
 
         if (vindex >= 0) {
-            // 3. Load fn pointer
+            // 2. Adjust basePtr if not the primary VTable
+            u32 vtOffset = vts[vtableIdx].offset;
+            IRValue adjustedThis = basePtr;
+            if (vtOffset > 0) {
+                IRValue offVal = IRValue::constant(types_.intTy(), (u64)vtOffset);
+                IRValue rawPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.charTy()), basePtr);
+                adjustedThis = builder_.gep(types_.charTy(), rawPtr, { offVal });
+            }
+
+            // 3. Load _vptr from adjustedThis
+            TypePtr ptrTy = types_.ptrTo(types_.ptrTo(types_.voidTy()));
+            IRValue vtablePtrAddr = builder_.cast(IROpcode::Bitcast, ptrTy, adjustedThis);
+            IRValue vtable = builder_.load(types_.ptrTo(types_.voidTy()), vtablePtrAddr);
+
+            // 4. Load fn pointer from VTable
             IRValue offset = IRValue::constant(types_.intTy(), (u64)(vindex * 8)); // 8-byte pointers
             IRValue fnPtrAddr = builder_.gep(types_.ptrTo(types_.voidTy()), vtable, { offset });
             IRValue fnPtr = builder_.load(types_.ptrTo(method->type), fnPtrAddr);
 
-            // 4. Call
+            // 5. Call
             TypePtr retTy = types_.voidTy();
             if (method->type && method->type->kind() == TypeKind::Function) {
                 retTy = std::static_pointer_cast<FunctionType>(method->type)->returnTypePtr();
             }
             std::vector<IRValue> args;
-            args.push_back(basePtr);
+            args.push_back(adjustedThis);
             for (auto& arg : e->args) args.push_back(genExpr(arg.get()));
 
             return builder_.call(retTy, fnPtr, std::move(args));
@@ -1289,7 +1360,7 @@ IRValue IRGen::genMemberCall(const CallExpr* e, IRValue basePtr, const MethodInf
     }
 
     // Static call
-    std::string mangledName = mangleMethod(method->parent, method);
+    std::string mangledName = mangleMethod(static_cast<const RecordType*>(method->parent.get()), method);
     
     TypePtr retTy = types_.voidTy();
     if (method->type && method->type->kind() == TypeKind::Function) {
@@ -1447,6 +1518,36 @@ IRValue IRGen::coerce(IRValue v, Type* from, Type* to) {
     from = stripQuals(from);
     to   = stripQuals(to);
     if (typeEqual(from, to)) return v;
+
+    // Pointer-to-Record conversion (derived-to-base)
+    if (from->kind() == TypeKind::Pointer && to->kind() == TypeKind::Pointer) {
+        Type* pf = stripQuals(static_cast<PointerType*>(from)->pointee());
+        Type* pt = stripQuals(static_cast<PointerType*>(to)->pointee());
+        if (pf->isRecord() && pt->isRecord()) {
+            RecordType* drv = static_cast<RecordType*>(pf);
+            RecordType* bse = static_cast<RecordType*>(pt);
+            
+            // Find offset
+            std::function<std::optional<u32>(RecordType*, RecordType*)> findBaseOffset;
+            findBaseOffset = [&](RecordType* d, RecordType* b) -> std::optional<u32> {
+                if (typeEqual(d, b)) return 0;
+                for (size_t i = 0; i < d->baseClasses().size(); ++i) {
+                    auto off = findBaseOffset(d->baseClasses()[i].get(), b);
+                    if (off) return *off + d->baseOffsets()[i];
+                }
+                return std::nullopt;
+            };
+            
+            auto offset = findBaseOffset(drv, bse);
+            if (offset && *offset > 0) {
+                IRValue offVal = IRValue::constant(types_.intTy(), (u64)*offset);
+                IRValue rawPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.charTy()), v);
+                IRValue adjustedPtr = builder_.gep(types_.charTy(), rawPtr, { offVal });
+                return builder_.cast(IROpcode::Bitcast, types_.ptrTo(std::shared_ptr<Type>(v.type, pt)), adjustedPtr);
+            }
+        }
+    }
+
     IROpcode op = selectCastOp(from, to);
     TypePtr toTy;
     // Build a shared_ptr for 'to' — we need one from the module context.

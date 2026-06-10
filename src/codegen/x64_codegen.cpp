@@ -1521,7 +1521,11 @@ void X64CodeGen::emitAssembly(FILE* out) {
                 fprintf(out, "0\n");
             } else if (!g.symbolInits.empty()) {
                 for (const auto& sym : g.symbolInits) {
-                    fprintf(out, "    dq %s\n", sym.c_str());
+                    if (sym == "0") {
+                        fprintf(out, "    dq 0\n");
+                    } else {
+                        fprintf(out, "    dq %s\n", sym.c_str());
+                    }
                 }
             } else {
                 fprintf(out, "    db ");

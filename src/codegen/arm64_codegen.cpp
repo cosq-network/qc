@@ -674,9 +674,13 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
                 fprintf(out, "    .ascii \"%s\"\n    .byte 0\n", s.c_str());
             } else if (!g.symbolInits.empty()) {
                 for (const auto& sym : g.symbolInits) {
-                    std::string s = sym;
-                    if (isMachO_) s = "_" + s;
-                    fprintf(out, "    .quad %s\n", s.c_str());
+                    if (sym == "0") {
+                        fprintf(out, "    .quad 0\n");
+                    } else {
+                        std::string s = sym;
+                        if (isMachO_) s = "_" + s;
+                        fprintf(out, "    .quad %s\n", s.c_str());
+                    }
                 }
             } else {
                 fprintf(out, "    .byte");

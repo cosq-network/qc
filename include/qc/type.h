@@ -161,9 +161,10 @@ struct FieldInfo {
 struct MethodInfo {
     std::string name;
     TypePtr     type; // FunctionType
-    class RecordType* parent = nullptr;
+    TypePtr     parent = nullptr;
     bool        isStatic = false;
     bool        isVirtual = false;
+    bool        isPureVirtual = false;
     bool        isConstructor = false;
     bool        isDestructor = false;
 };
@@ -183,8 +184,9 @@ public:
     const std::vector<MethodInfo>& methods() const { return methods_; }
     bool isComplete() const { return complete_; }
 
-    void setBaseClass(Ref<RecordType> base);
-    RecordType* baseClass() const { return base_.get(); }
+    void addBaseClass(Ref<RecordType> base);
+    const std::vector<Ref<RecordType>>& baseClasses() const { return bases_; }
+    const std::vector<u32>& baseOffsets() const { return baseOffsets_; }
 
     void addField(FieldInfo f);
     void addMethod(MethodInfo m);
@@ -201,15 +203,29 @@ public:
         const MethodInfo* method;
         int               vtableIndex;
     };
-    const std::vector<VirtualMethod>& vtable() const { return vtable_; }
+    struct VTable {
+        u32 offset;
+        std::vector<VirtualMethod> entries;
+    };
+    const std::vector<VTable>& vtables() const { return vtables_; }
+
+    bool isAbstract() const {
+        for (const auto& vt : vtables_) {
+            for (const auto& ve : vt.entries) {
+                if (ve.method->isPureVirtual) return true;
+            }
+        }
+        return false;
+    }
 
 private:
     TypeKind            kind_;
     std::string         name_;
-    Ref<RecordType>     base_;
+    std::vector<Ref<RecordType>> bases_;
+    std::vector<u32>    baseOffsets_;
     std::vector<FieldInfo> fields_;
     std::vector<MethodInfo> methods_;
-    std::vector<VirtualMethod> vtable_;
+    std::vector<VTable> vtables_; // NEW
     u32                 size_   = 0;
     u32                 align_  = 1;
     bool                complete_ = false;

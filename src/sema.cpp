@@ -104,6 +104,10 @@ void Sema::analyseVarDecl(VarDecl* d) {
     if (rawTy->kind() == TypeKind::Class || rawTy->kind() == TypeKind::Struct) {
         auto* rt = static_cast<RecordType*>(rawTy);
         
+        if (rt->isAbstract()) {
+            diag_.error(d->loc, "cannot instantiate abstract class '" + rt->name() + "'");
+        }
+
         // Resolve constructor
         std::vector<TypePtr> argTypes;
         for (auto& arg : d->args) {
@@ -177,6 +181,17 @@ void Sema::analyseFuncDecl(FuncDecl* d) {
         psym.decl = param.get();
         psym.type = param->type;
         define(std::move(psym));
+    }
+
+    // C++: Handle base constructor resolution
+    if (d->isConstructor && d->parentRecordType) {
+        for (const auto& base : d->parentRecordType->baseClasses()) {
+            // Find default constructor of base class
+            const MethodInfo* ctor = base->findConstructor({});
+            if (ctor) {
+                d->baseConstructors.push_back(ctor);
+            }
+        }
     }
 
     // Analyse body
@@ -520,6 +535,11 @@ void Sema::analyseExpr(Expr* e) {
         Type* base = stripQuals(ne->allocType.get());
         if (base->isRecord()) {
             auto* rt = static_cast<RecordType*>(base);
+            
+            if (rt->isAbstract()) {
+                diag_.error(e->loc, "cannot instantiate abstract class '" + rt->name() + "'");
+            }
+
             // Search for member operator new if no placement args (standard new)
             if (ne->placement.empty()) {
                 ne->opNew = rt->findOperatorNew();
@@ -1272,6 +1292,28 @@ bool Sema::implicitlyConvertible(Type* from, Type* to) {
 
     // Arithmetic conversions
     if (sf->isArithmetic() && st->isArithmetic()) return true;
+
+    // Pointer to record conversion (derived-to-base)
+    if (sf->kind() == TypeKind::Pointer && st->kind() == TypeKind::Pointer) {
+        Type* pf = stripQuals(static_cast<PointerType*>(sf)->pointee());
+        Type* pt = stripQuals(static_cast<PointerType*>(st)->pointee());
+        if (pf->isRecord() && pt->isRecord()) {
+            RecordType* drv = static_cast<RecordType*>(pf);
+            RecordType* bse = static_cast<RecordType*>(pt);
+            
+            // Check if bse is in drv's base list
+            std::function<bool(RecordType*, RecordType*)> isBaseOf;
+            isBaseOf = [&](RecordType* d, RecordType* b) {
+                if (typeEqual(d, b)) return true;
+                for (const auto& base : d->baseClasses()) {
+                    if (isBaseOf(base.get(), b)) return true;
+                }
+                return false;
+            };
+            
+            if (isBaseOf(drv, bse)) return true;
+        }
+    }
 
     // Pointer to void*
     if (sf->kind() == TypeKind::Pointer && st->kind() == TypeKind::Pointer) {

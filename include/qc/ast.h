@@ -377,13 +377,16 @@ struct FuncDecl : Decl {
     bool                        isVariadic    = false;
     bool                        isConstructor = false;
     bool                        isDestructor  = false;
+
+    std::vector<const MethodInfo*> baseConstructors;
+
     DeclKind kind() const override { return DeclKind::Function; }
 };
 
 struct RecordDecl : Decl {
     std::vector<DeclPtr>    members;
     Ref<RecordType>         recordType;
-    Ref<RecordType>         baseClass;
+    std::vector<Ref<RecordType>> baseClasses;
     DeclKind kind() const override {
         if (name.empty()) return DeclKind::Struct;
         return DeclKind::Struct; // refined by RecordType::kind()
