@@ -30,6 +30,19 @@
 *.exe
 *.out
 *.app
+tests/hello_stdqc
+tests/simple
+tests/simple_g
+tests/test_kernel_lld
+tests/test_raii
+tests/test_simple
+tests/test_stdqc_c_g
+tests/test_stdqc_c_qc
+
+# Compiler Artifacts
+*.s
+*.ll
+*.dSYM/
 
 # CMake
 build/
