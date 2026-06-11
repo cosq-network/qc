@@ -81,7 +81,7 @@ add_subdirectory(qbios)
 set(CPACK_PACKAGE_NAME "qc-compiler")
 set(CPACK_PACKAGE_VENDOR "COSQ Network Private Limited")
 set(CPACK_PACKAGE_CONTACT "Benoy Bose <benoybose@cosq.net>")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "qc - A C11 and C++ Compiler Prototype")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "qc - A C11 and C++ Compiler Toolchain")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
 
 # Semantic Versioning

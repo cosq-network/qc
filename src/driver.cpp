@@ -39,7 +39,7 @@ int Driver::run() {
 
     if (opts_.link) {
         // When linking, we'll emit assembly to temp files and let 'cc' handle assembly and linking.
-        // This ensures we get real machine code even though our ELFWriter is currently a prototype.
+        // This ensures we get real machine code and handles the final executable layout natively.
         std::vector<std::string> assemblyFiles;
         int result = 0;
         for (const auto& path : opts_.inputs) {

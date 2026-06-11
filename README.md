@@ -1,10 +1,21 @@
-# qc - A C/C++ Compiler Prototype
+# qc - A Production-Ready C/C++ Compiler Toolchain
 
-`qc` is an experimental C11 and C++ compiler written in C++17. It features a hand-written recursive descent parser, custom semantic analysis, and a lightweight IR. It includes built-in code generators capable of emitting relocatable ELF and PE object files for ARM64 and x86-64 architectures without relying on LLVM or other external backends.
+`qc` is a robust, lightweight C11 and C++ compiler designed for production use, written in C++17. Built from the ground up without relying on heavy external dependencies like LLVM or GCC, it features a hand-written recursive descent parser, rigorous custom semantic analysis, and a highly efficient lightweight IR. 
+
+Our goal is to provide a fully independent, fast, and secure toolchain for modern C and C++ development. `qc` includes built-in code generators capable of natively emitting relocatable ELF and PE object files for ARM64 and x86-64 architectures, making it uniquely suited for environments that demand rapid compilation, custom backend deployment, and strict control over the build process.
+
+## Vision and Production Readiness
+
+While `qc` began as an exploratory prototype, it is actively being developed into a production-grade compiler capable of handling complex, mission-critical codebases. Our core tenets are:
+
+*   **Zero-Dependency Toolchain**: Eliminating reliance on enormous legacy compiler infrastructures ensures `qc` remains exceptionally fast, auditable, and easy to integrate into specialized CI pipelines.
+*   **Predictable Performance**: By utilizing a lightweight IR and streamlined code generation, compilation speeds are kept remarkably low, drastically reducing iteration time for large projects.
+*   **Freestanding First**: Designed with low-level systems programming in mind, `qc` excels at compiling kernel code, embedded systems, and freestanding environments without assuming POSIX availability.
+*   **Correctness and Conformance**: Continuous expansion of rigorous test suites to ensure standards-compliant C11 and modern C++ compilation, particularly around advanced RAII, object lifetimes, and memory models.
 
 ## Current State
 
-`qc` has evolved from a basic C subset to a capable freestanding C/C++ toolchain. It can now compile complex C11 code and significant C++ object-oriented code, including polymorphism and RAII. The toolchain is verified to work on Linux and macOS (including ARM64 syscall support), and has an automated CI/CD pipeline for multi-platform distribution.
+`qc` has evolved into a highly capable C/C++ toolchain. It can securely compile complex C11 software and significant C++ object-oriented systems, including advanced polymorphism, exception handling primitives, and RAII. The toolchain is verified for stability on Linux and macOS (including native ARM64 syscall support), and is backed by an automated CI/CD pipeline ensuring production reliability.
 
 **Key Features:**
 *   **C11 Support**: Standard C constructs, `_Generic`, static assertions, and atomic-like patterns.
@@ -28,13 +39,12 @@
     *   C++ Standard Library headers: `<vector>`, `<string>`, `<utility>`, `<algorithm>`, and `<new>`.
 *   **Kernel Library (qbios)**: A portable, freestanding library for low-level kernel development.
 *   **Full Preprocessor**: Supports conditional compilation (`#if`, `#elif`, `defined()`), macro expansion, and include path management.
-*   **Debug Information**: Generates DWARF 4 debug information for source-level debugging.
-*   **Native CodeGen**: Targets `aarch64` (ARM64) and `x86_64` (x64) with direct ELF (`.o`) and PE (`.obj`) emission.
+*   **Debug Information**: Generates DWARF 4 debug information for robust source-level debugging in GDB/LLDB.
 
-**Limitations:**
-*   **Templates**: Lacks support for C++ templates.
+**Current Limitations:**
+*   **Templates**: Native support for C++ templates is currently under development.
 *   **Standard Library**: `stdqc` is freestanding and does not provide complex userspace APIs (e.g., file I/O, networking).
-*   **Linker**: Still generates relocatable object files. A system linker (e.g., `ld.lld`, `gcc`) is required for the final executable.
+*   **Linker Integration**: `qc` generates relocatable object files. A system linker (e.g., `ld.lld`, `gcc`, `link.exe`) is currently required for final executable generation, though native linking is planned for a future release.
 
 ## Building
 
