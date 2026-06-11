@@ -171,6 +171,41 @@ IRValue IRBuilder::call(TypePtr retTy, IRValue fn, std::vector<IRValue> args) {
     return dst;
 }
 
+IRValue IRBuilder::invoke(TypePtr retTy, IRValue fn, std::vector<IRValue> args, IRBlock* normal, IRBlock* unwind) {
+    IRInstr instr;
+    instr.op     = IROpcode::Invoke;
+    instr.opType = retTy;
+    bool hasResult = retTy && !retTy->isVoid();
+    if (hasResult) {
+        instr.dst = newReg(retTy);
+    } else {
+        instr.dst = IRValue::voidVal();
+    }
+    IRValue dst = instr.dst;
+    instr.srcs.push_back(std::move(fn));
+    for (auto& a : args) {
+        instr.srcs.push_back(std::move(a));
+    }
+    instr.label  = normal->name;
+    instr.label2 = unwind->name;
+    emit(std::move(instr));
+    return dst;
+}
+
+void IRBuilder::landingpad(IRValue dst) {
+    IRInstr instr;
+    instr.op  = IROpcode::LandingPad;
+    instr.dst = dst;
+    emit(std::move(instr));
+}
+
+void IRBuilder::resume(IRValue val) {
+    IRInstr instr;
+    instr.op = IROpcode::Resume;
+    instr.srcs.push_back(std::move(val));
+    emit(std::move(instr));
+}
+
 IRValue IRBuilder::gep(TypePtr elemTy, IRValue base, std::vector<IRValue> idx) {
     // Result is a pointer to elemTy.
     static thread_local std::unordered_map<Type*, TypePtr> ptrCache;
@@ -388,6 +423,9 @@ static const char* opcodeName(IROpcode op) {
         case IROpcode::GEP:       return "getelementptr";
         case IROpcode::MemCopy:   return "memcpy";
         case IROpcode::MemSet:    return "memset";
+        case IROpcode::Invoke:    return "invoke";
+        case IROpcode::LandingPad: return "landingpad";
+        case IROpcode::Resume:    return "resume";
     }
     return "???";
 }
@@ -461,6 +499,42 @@ static void dumpInstr(const IRInstr& ins, FILE* out) {
                 std::fprintf(out, "  call %s %s(%s)\n",
                     retTy.c_str(), fnVal.c_str(), argStr.c_str());
             }
+            break;
+        }
+
+        case IROpcode::Invoke: {
+            std::string retTy = ins.opType ? typeStr(ins.opType.get()) : "void";
+            std::string fnVal = ins.srcs.empty() ? "?" : valStr(ins.srcs[0]);
+            std::string argStr;
+            for (std::size_t i = 1; i < ins.srcs.size(); ++i) {
+                if (i > 1) argStr += ", ";
+                if (ins.srcs[i].type) {
+                    argStr += typeStr(ins.srcs[i].type.get());
+                    argStr += " ";
+                }
+                argStr += valStr(ins.srcs[i]);
+            }
+            if (ins.hasDst()) {
+                std::fprintf(out, "  %s = invoke %s %s(%s) to label %%%s unwind label %%%s\n",
+                    valStr(ins.dst).c_str(), retTy.c_str(), fnVal.c_str(), argStr.c_str(),
+                    ins.label.c_str(), ins.label2.c_str());
+            } else {
+                std::fprintf(out, "  invoke %s %s(%s) to label %%%s unwind label %%%s\n",
+                    retTy.c_str(), fnVal.c_str(), argStr.c_str(),
+                    ins.label.c_str(), ins.label2.c_str());
+            }
+            break;
+        }
+
+        case IROpcode::LandingPad: {
+            std::fprintf(out, "  %s = landingpad\n", valStr(ins.dst).c_str());
+            break;
+        }
+
+        case IROpcode::Resume: {
+            std::fprintf(out, "  resume %s %s\n",
+                ins.srcs[0].type ? typeStr(ins.srcs[0].type.get()).c_str() : "?",
+                valStr(ins.srcs[0]).c_str());
             break;
         }
 

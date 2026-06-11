@@ -71,10 +71,36 @@ target_compile_definitions(qc PRIVATE
 
 # Install
 install(TARGETS qc RUNTIME DESTINATION bin)
+install(FILES LICENSE DESTINATION .)
 
 # Standard Library
 add_subdirectory(stdqc)
 add_subdirectory(qbios)
+
+# CPack Integration
+set(CPACK_PACKAGE_NAME "qc-compiler")
+set(CPACK_PACKAGE_VENDOR "COSQ Network Private Limited")
+set(CPACK_PACKAGE_CONTACT "Benoy Bose <benoybose@cosq.net>")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "qc - A C11 and C++ Compiler Prototype")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+
+# Binary generators
+if(WIN32)
+  set(CPACK_GENERATOR "ZIP;NSIS")
+elseif(APPLE)
+  set(CPACK_GENERATOR "TGZ;DragNDrop")
+else()
+  set(CPACK_GENERATOR "TGZ;DEB;RPM")
+endif()
+
+# Platform-specific settings
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${CPACK_PACKAGE_CONTACT}")
+set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+set(CPACK_NSIS_DISPLAY_NAME "qc Compiler")
+set(CPACK_NSIS_HELP_LINK "https://cosq.net")
+
+include(CPack)
 
 
 # Tests (optional)

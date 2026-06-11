@@ -1,0 +1,208 @@
+// qc ARM64 assembly (AAPCS64, GAS syntax)
+
+
+.section .text
+
+.global RAII_RAII
+.type RAII_RAII, %function
+RAII_RAII:
+        sub sp, sp, #160
+        stp x29, x30, [sp, #144]
+        add x29, sp, #144
+        str x0, [sp, #20]
+        str x1, [sp, #28]
+.LRAII_RAII_entry:
+        add x9, sp, #0
+        str x9, [sp, #36]
+        ldr x9, [sp, #20]
+        ldr x10, [sp, #36]
+        str x9, [x10]
+        add x9, sp, #8
+        str x9, [sp, #44]
+        ldr x9, [sp, #20]
+        ldr x10, [sp, #44]
+        str x9, [x10]
+        add x9, sp, #16
+        str x9, [sp, #52]
+        ldrsw x9, [sp, #28]
+        ldr x10, [sp, #52]
+        str w9, [x10]
+        ldr x9, [sp, #36]
+        ldr x10, [x9]
+        str x10, [sp, #60]
+        ldr x9, [sp, #60]
+        mov x10, #0
+        add x9, x9, x10
+        str x9, [sp, #68]
+        ldr x9, [sp, #52]
+        ldr w10, [x9]
+        str x10, [sp, #76]
+        ldrsw x9, [sp, #76]
+        ldr x10, [sp, #68]
+        str w9, [x10]
+        mov x0, #67
+        bl putchar
+        str x0, [sp, #84]
+        ldr x9, [sp, #36]
+        ldr x10, [x9]
+        str x10, [sp, #92]
+        ldr x9, [sp, #92]
+        mov x10, #0
+        add x9, x9, x10
+        str x9, [sp, #100]
+        ldr x9, [sp, #100]
+        ldr w10, [x9]
+        str x10, [sp, #108]
+        ldrsw x9, [sp, #108]
+        mov x10, #48
+        add x9, x9, x10
+        str x9, [sp, #116]
+        ldrsw x0, [sp, #116]
+        bl putchar
+        str x0, [sp, #124]
+        ldp x29, x30, [sp, #144]
+        add sp, sp, #160
+        ret
+.size RAII_RAII, .-RAII_RAII
+
+.global RAII_destructor
+.type RAII_destructor, %function
+RAII_destructor:
+        sub sp, sp, #112
+        stp x29, x30, [sp, #96]
+        add x29, sp, #96
+        str x0, [sp, #16]
+.LRAII_destructor_entry:
+        add x9, sp, #0
+        str x9, [sp, #24]
+        ldr x9, [sp, #16]
+        ldr x10, [sp, #24]
+        str x9, [x10]
+        add x9, sp, #8
+        str x9, [sp, #32]
+        ldr x9, [sp, #16]
+        ldr x10, [sp, #32]
+        str x9, [x10]
+        mov x0, #68
+        bl putchar
+        str x0, [sp, #40]
+        ldr x9, [sp, #24]
+        ldr x10, [x9]
+        str x10, [sp, #48]
+        ldr x9, [sp, #48]
+        mov x10, #0
+        add x9, x9, x10
+        str x9, [sp, #56]
+        ldr x9, [sp, #56]
+        ldr w10, [x9]
+        str x10, [sp, #64]
+        ldrsw x9, [sp, #64]
+        mov x10, #48
+        add x9, x9, x10
+        str x9, [sp, #72]
+        ldrsw x0, [sp, #72]
+        bl putchar
+        str x0, [sp, #80]
+        ldp x29, x30, [sp, #96]
+        add sp, sp, #112
+        ret
+.size RAII_destructor, .-RAII_destructor
+
+.global RAII_get
+.type RAII_get, %function
+RAII_get:
+        sub sp, sp, #80
+        stp x29, x30, [sp, #64]
+        add x29, sp, #64
+        str x0, [sp, #16]
+.LRAII_get_entry:
+        add x9, sp, #0
+        str x9, [sp, #24]
+        ldr x9, [sp, #16]
+        ldr x10, [sp, #24]
+        str x9, [x10]
+        add x9, sp, #8
+        str x9, [sp, #32]
+        ldr x9, [sp, #16]
+        ldr x10, [sp, #32]
+        str x9, [x10]
+        ldr x9, [sp, #24]
+        ldr x10, [x9]
+        str x10, [sp, #40]
+        ldr x9, [sp, #40]
+        mov x10, #0
+        add x9, x9, x10
+        str x9, [sp, #48]
+        ldr x9, [sp, #48]
+        ldr w10, [x9]
+        str x10, [sp, #56]
+        ldrsw x0, [sp, #56]
+        ldp x29, x30, [sp, #64]
+        add sp, sp, #80
+        ret
+.size RAII_get, .-RAII_get
+
+.global use
+.type use, %function
+use:
+        sub sp, sp, #64
+        stp x29, x30, [sp, #48]
+        add x29, sp, #48
+        str x0, [sp, #8]
+.Luse_entry:
+        add x9, sp, #0
+        str x9, [sp, #16]
+        ldr x9, [sp, #8]
+        ldr x10, [sp, #16]
+        str x9, [x10]
+        ldr x9, [sp, #16]
+        mov x10, #51281944
+        add x9, x9, x10
+        str x9, [sp, #24]
+        ldr x9, [sp, #24]
+        ldr x10, [x9]
+        str x10, [sp, #32]
+        ldr x9, [sp, #32]
+        blr x9
+        str x0, [sp, #40]
+        ldrsw x0, [sp, #40]
+        ldp x29, x30, [sp, #48]
+        add sp, sp, #64
+        ret
+.size use, .-use
+
+.global main
+.type main, %function
+main:
+        sub sp, sp, #80
+        stp x29, x30, [sp, #64]
+        add x29, sp, #64
+.Lmain_entry:
+        mov x0, #49
+        bl putchar
+        str x0, [sp, #4]
+        add x9, sp, #0
+        str x9, [sp, #12]
+        ldr x0, [sp, #12]
+        mov x1, #2
+        bl RAII_RAII
+        ldr x9, [sp, #12]
+        ldr w10, [x9]
+        str x10, [sp, #20]
+        ldr w0, [sp, #20]
+        bl use
+        str x0, [sp, #28]
+        ldr x0, [sp, #12]
+        bl RAII_destructor
+        mov x0, #51
+        bl putchar
+        str x0, [sp, #36]
+        mov x0, #10
+        bl putchar
+        str x0, [sp, #44]
+        mov x0, #0
+        ldp x29, x30, [sp, #64]
+        add sp, sp, #80
+        ret
+.size main, .-main
+

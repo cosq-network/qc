@@ -129,6 +129,18 @@ void Sema::analyseVarDecl(VarDecl* d) {
     // Analyse initializer
     if (d->init) {
         analyseExpr(d->init.get());
+        
+        // Copy initialization for records: RAII a = b;
+        if (rawTy->isRecord() && d->init->type && implicitlyConvertible(d->init->type.get(), rawTy)) {
+            auto* rt = static_cast<RecordType*>(rawTy);
+            if (d->init->isLValue) {
+                d->constructor = rt->findCopyConstructor();
+            } else {
+                d->constructor = rt->findMoveConstructor();
+                if (!d->constructor) d->constructor = rt->findCopyConstructor();
+            }
+        }
+
         // Check assignability
         if (d->init->type && d->type) {
             if (!implicitlyConvertible(d->init->type.get(), d->type.get())) {
@@ -148,12 +160,14 @@ void Sema::analyseVarDecl(VarDecl* d) {
 
 void Sema::analyseFuncDecl(FuncDecl* d) {
     if (!d) return;
-    // Register function in outer scope
-    Symbol sym;
-    sym.name = d->name;
-    sym.decl = d;
-    sym.type = d->type;
-    define(sym);
+    // Register function in outer scope if not a member function
+    if (!d->parentRecordType) {
+        Symbol sym;
+        sym.name = d->name;
+        sym.decl = d;
+        sym.type = d->type;
+        define(sym);
+    }
 
     if (!d->body) return; // declaration only
 
@@ -183,7 +197,19 @@ void Sema::analyseFuncDecl(FuncDecl* d) {
         define(std::move(psym));
     }
 
-    // C++: Handle base constructor resolution
+    // C++: Handle virtuality and base constructor resolution
+    if (d->parentRecordType) {
+        if (d->isDestructor) {
+            for (const auto& base : d->parentRecordType->baseClasses()) {
+                const MethodInfo* baseDtor = base->findDestructor();
+                if (baseDtor && baseDtor->isVirtual) {
+                    d->isVirtual = true;
+                    break;
+                }
+            }
+        }
+    }
+
     if (d->isConstructor && d->parentRecordType) {
         for (const auto& base : d->parentRecordType->baseClasses()) {
             // Find default constructor of base class
@@ -204,7 +230,14 @@ void Sema::analyseFuncDecl(FuncDecl* d) {
 void Sema::analyseRecordDecl(RecordDecl* d) {
     if (!d) return;
     if (d->recordType) {
-        // Register in scope as a type (handled by parser's typedef mechanism)
+        // Register in scope as a type
+        if (!d->name.empty()) {
+            Symbol sym;
+            sym.name = d->name;
+            sym.decl = d;
+            sym.type = d->recordType;
+            define(std::move(sym));
+        }
         // Analyse member declarations
         for (auto& mem : d->members) {
             if (mem) analyseDecl(mem.get());
@@ -692,6 +725,9 @@ void Sema::analyseIdent(IdentExpr* e) {
         if (dk == DeclKind::Var || dk == DeclKind::Param || dk == DeclKind::Field) {
             e->isLValue = true;
         }
+    } else if (sym->type && (sym->type->kind() == TypeKind::Reference || sym->type->kind() == TypeKind::RValueRef)) {
+        // References are lvalues
+        e->isLValue = true;
     }
 }
 
@@ -702,6 +738,8 @@ void Sema::analyseBinary(BinaryExpr* e) {
 
     TypePtr lt = e->lhs->type ? decayType(e->lhs->type) : types_.intTy();
     TypePtr rt = e->rhs->type ? decayType(e->rhs->type) : types_.intTy();
+
+    // fprintf(stderr, "DEBUG: analyseBinary op=%d lhs=%p rhs=%p\n", (int)e->op, (void*)lt.get(), (void*)rt.get());
 
     switch (e->op) {
     case BinaryOp::Add:
@@ -842,8 +880,27 @@ void Sema::analyseCall(CallExpr* e) {
         e->type = types_.intTy();
         return;
     }
-
+    
     Type* ct = stripQuals(calleeType.get());
+
+    // Check for functional cast: RAII(1)
+    if (ct->isRecord()) {
+        auto* rt = static_cast<RecordType*>(ct);
+        std::vector<TypePtr> argTypes;
+        for (auto& arg : e->args) {
+            if (arg) argTypes.push_back(arg->type);
+            else     argTypes.push_back(nullptr);
+        }
+        
+        e->constructor = rt->findConstructor(argTypes);
+        if (!e->constructor) {
+            diag_.error(e->loc, "no matching constructor for functional cast to " + rt->toString());
+        }
+        e->type = calleeType;
+        e->isLValue = false;
+        return;
+    }
+
     // Function pointer or function type
     FunctionType* fty = nullptr;
     if (ct && ct->kind() == TypeKind::Pointer) {
@@ -953,10 +1010,19 @@ void Sema::analyseMember(MemberExpr* e) {
         // -> : base must be pointer to struct/union/class
         if (bt && bt->kind() == TypeKind::Pointer) {
             bt = stripQuals(static_cast<PointerType*>(bt)->pointee());
+        } else if (bt && bt->kind() == TypeKind::Reference) {
+            bt = stripQuals(static_cast<PointerType*>(bt)->pointee());
+            // In C++, ref->member is allowed if ref is a reference to a pointer? 
+            // Actually, usually it's ref.member. But let's be safe.
         } else {
             diag_.error(e->loc, "'->' requires pointer to struct/union/class");
             e->type = types_.intTy();
             return;
+        }
+    } else {
+        // . : base must be struct/union/class or reference to it
+        if (bt && bt->kind() == TypeKind::Reference) {
+            bt = stripQuals(static_cast<PointerType*>(bt)->pointee());
         }
     }
 
@@ -965,8 +1031,8 @@ void Sema::analyseMember(MemberExpr* e) {
         e->type = types_.intTy();
         return;
     }
-
-    if (bt->kind() != TypeKind::Struct && bt->kind() != TypeKind::Union && bt->kind() != TypeKind::Class) {
+    
+    if (!bt->isRecord()) {
         diag_.error(e->loc, "member access on non-struct/union/class type");
         e->type = types_.intTy();
         return;
@@ -1290,6 +1356,13 @@ bool Sema::implicitlyConvertible(Type* from, Type* to) {
 
     if (!sf || !st) return true;
 
+    // Reference binding
+    if (st->kind() == TypeKind::Reference) {
+        Type* pt = stripQuals(static_cast<PointerType*>(st)->pointee());
+        // T -> const T&
+        if (implicitlyConvertible(sf, pt)) return true;
+    }
+
     // Arithmetic conversions
     if (sf->isArithmetic() && st->isArithmetic()) return true;
 
@@ -1320,8 +1393,8 @@ bool Sema::implicitlyConvertible(Type* from, Type* to) {
         Type* pf = stripQuals(static_cast<PointerType*>(sf)->pointee());
         Type* pt = stripQuals(static_cast<PointerType*>(st)->pointee());
         if (!pf || !pt) return true;
-        if (pt->isVoid() || pf->isVoid()) return true;
-        return typeCompatible(pf, pt);
+        if (pt->isVoid() || pf->isVoid()) return typeCompatible(pf, pt);
+        if (typeCompatible(pf, pt)) return true;
     }
 
     // nullptr to pointer
@@ -1335,13 +1408,13 @@ bool Sema::implicitlyConvertible(Type* from, Type* to) {
         && st->kind() == TypeKind::Pointer) {
         const ArrayType* at = static_cast<const ArrayType*>(sf);
         const PointerType* pt = static_cast<const PointerType*>(st);
-        return typeCompatible(at->element(), pt->pointee());
+        if (typeCompatible(at->element(), pt->pointee())) return true;
     }
 
     // Function to function pointer
     if (sf->kind() == TypeKind::Function && st->kind() == TypeKind::Pointer) {
         Type* pp = stripQuals(static_cast<PointerType*>(st)->pointee());
-        return typeEqual(sf, pp);
+        if (typeEqual(sf, pp)) return true;
     }
 
     // Enum to integer
@@ -1360,8 +1433,7 @@ TypePtr Sema::decayType(TypePtr t) {
     // Array decays to pointer to element
     if (bt->kind() == TypeKind::Array || bt->kind() == TypeKind::IncompleteArray) {
         auto* at = static_cast<ArrayType*>(bt);
-        TypePtr elemTy(at->element(), [](Type*){});
-        return types_.ptrTo(elemTy);
+        return types_.ptrTo(at->elementPtr());
     }
 
     // Function decays to pointer to function

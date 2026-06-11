@@ -1477,17 +1477,24 @@ void X64CodeGen::emitAssembly(FILE* out) {
     // .data section
     bool hasData = false;
     for (auto& g : globOutputs_) {
-        if (!g.isZeroInit && (!g.initData.empty() || g.hasStringInit)) {
+        if (!g.isZeroInit && !g.isConst && (!g.initData.empty() || g.hasStringInit || !g.symbolInits.empty())) {
             if (!hasData) { fprintf(out, "section .data\n"); hasData = true; }
-            if (g.isConst) {
-                // put in rodata instead
-            }
+            u32 align = g.align > 0 ? g.align : 1;
+            fprintf(out, "align %u\n", align);
             fprintf(out, "global %s\n", g.name.c_str());
             fprintf(out, "%s:\n", g.name.c_str());
             if (g.hasStringInit) {
                 fprintf(out, "    db ");
                 for (char c : g.stringInit) fprintf(out, "%d,", (unsigned char)c);
                 fprintf(out, "0\n");
+            } else if (!g.symbolInits.empty()) {
+                for (const auto& sym : g.symbolInits) {
+                    if (sym == "0") {
+                        fprintf(out, "    dq 0\n");
+                    } else {
+                        fprintf(out, "    dq %s\n", sym.c_str());
+                    }
+                }
             } else {
                 fprintf(out, "    db ");
                 for (size_t i = 0; i < g.initData.size(); ++i) {
@@ -1503,6 +1510,8 @@ void X64CodeGen::emitAssembly(FILE* out) {
     for (auto& g : globOutputs_) {
         if (g.isZeroInit) {
             if (!hasBss) { fprintf(out, "\nsection .bss\n"); hasBss = true; }
+            u32 align = g.align > 0 ? g.align : 1;
+            fprintf(out, "align %u\n", align);
             fprintf(out, "global %s\n", g.name.c_str());
             fprintf(out, "%s: resb %u\n", g.name.c_str(), g.size);
         }
@@ -1513,6 +1522,8 @@ void X64CodeGen::emitAssembly(FILE* out) {
     for (auto& g : globOutputs_) {
         if (g.isConst && !g.isZeroInit && (!g.initData.empty() || g.hasStringInit || !g.symbolInits.empty())) {
             if (!hasRodata) { fprintf(out, "\nsection .rodata\n"); hasRodata = true; }
+            u32 align = g.align > 0 ? g.align : 1;
+            fprintf(out, "align %u\n", align);
             fprintf(out, "global %s\n", g.name.c_str());
             fprintf(out, "%s:\n", g.name.c_str());
             if (g.hasStringInit) {

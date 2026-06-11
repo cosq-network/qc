@@ -24,3 +24,8 @@ target_compile_features(stdqc PRIVATE cxx_std_17)
 if(NOT MSVC)
     target_compile_options(stdqc PRIVATE -ffreestanding -fno-exceptions -fno-rtti)
 endif()
+
+# Install rules
+install(TARGETS stdqc ARCHIVE DESTINATION lib)
+install(DIRECTORY include/c/ DESTINATION include/c)
+install(DIRECTORY include/cxx/ DESTINATION include/cxx)

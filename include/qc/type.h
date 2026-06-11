@@ -2,6 +2,7 @@
 #include "common.h"
 #include <string>
 #include <vector>
+#include <deque>
 
 namespace qc {
 
@@ -41,33 +42,38 @@ struct QualFlags {
     bool any() const { return isConst || isVolatile || isRestrict; }
 };
 
-class Type {
+class Type : public std::enable_shared_from_this<Type> {
 public:
     virtual ~Type() = default;
     virtual TypeKind kind() const = 0;
     virtual u32      size() const = 0;  // bytes
     virtual u32      align() const = 0; // bytes
     virtual std::string toString() const = 0;
+    virtual const Type* strip() const { return this; }
 
     bool isRecord() const {
-        TypeKind k = kind();
+        TypeKind k = strip()->kind();
         return k == TypeKind::Struct || k == TypeKind::Union || k == TypeKind::Class;
     }
     bool isStruct() const { return isRecord(); }
 
     bool isPointer() const {
-        return kind() == TypeKind::Pointer;
+        return strip()->kind() == TypeKind::Pointer;
     }
 
     bool isFunction() const {
-        return kind() == TypeKind::Function;
+        return strip()->kind() == TypeKind::Function;
     }
 
-    bool isVoid()     const { return kind() == TypeKind::Void; }
+    bool isVoid()     const { return strip()->kind() == TypeKind::Void; }
     bool isInteger()  const;
-    bool isArray()    const { return kind() == TypeKind::Array || kind() == TypeKind::IncompleteArray; }
+    bool isArray()    const { TypeKind k = strip()->kind(); return k == TypeKind::Array || k == TypeKind::IncompleteArray; }
     bool isArithmetic() const { return isInteger() || isFloat(); }
-    bool isScalar()   const { return isArithmetic() || isPointer() || kind() == TypeKind::NullptrT || kind() == TypeKind::Enum; }
+    bool isScalar()   const { 
+        const Type* t = strip();
+        TypeKind k = t->kind();
+        return isArithmetic() || k == TypeKind::Pointer || k == TypeKind::NullptrT || k == TypeKind::Enum; 
+    }
     bool isFloat()    const;
     bool isSigned()   const;
 
@@ -117,6 +123,7 @@ public:
     u32      align() const override { return elem_->align(); }
     std::string toString() const override;
     Type* element() const { return elem_.get(); }
+    TypePtr elementPtr() const { return elem_; }
     i64   count()   const { return count_; }
 
 private:
@@ -180,8 +187,8 @@ public:
     std::string toString() const override;
 
     const std::string& name() const { return name_; }
-    const std::vector<FieldInfo>& fields() const { return fields_; }
-    const std::vector<MethodInfo>& methods() const { return methods_; }
+    const std::deque<FieldInfo>& fields() const { return fields_; }
+    const std::deque<MethodInfo>& methods() const { return methods_; }
     bool isComplete() const { return complete_; }
 
     void addBaseClass(Ref<RecordType> base);
@@ -195,6 +202,8 @@ public:
     int  methodIndex(std::string_view name) const;
 
     const MethodInfo* findConstructor(const std::vector<TypePtr>& argTypes) const;
+    const MethodInfo* findCopyConstructor() const;
+    const MethodInfo* findMoveConstructor() const;
     const MethodInfo* findDestructor() const;
     const MethodInfo* findOperatorNew() const;
     const MethodInfo* findOperatorDelete() const;
@@ -202,6 +211,7 @@ public:
     struct VirtualMethod {
         const MethodInfo* method;
         int               vtableIndex;
+        bool              isDeletingDestructor = false;
     };
     struct VTable {
         u32 offset;
@@ -223,8 +233,8 @@ private:
     std::string         name_;
     std::vector<Ref<RecordType>> bases_;
     std::vector<u32>    baseOffsets_;
-    std::vector<FieldInfo> fields_;
-    std::vector<MethodInfo> methods_;
+    std::deque<FieldInfo> fields_;
+    std::deque<MethodInfo> methods_;
     std::vector<VTable> vtables_; // NEW
     u32                 size_   = 0;
     u32                 align_  = 1;
@@ -255,11 +265,13 @@ private:
 class QualType : public Type {
 public:
     QualType(TypePtr base, QualFlags q) : base_(std::move(base)) { quals_ = q; }
-    TypeKind kind()  const override { return base_->kind(); }
+    TypeKind kind()  const override { return TypeKind::Qualified; }
     u32      size()  const override { return base_->size(); }
     u32      align() const override { return base_->align(); }
     std::string toString() const override;
+    const Type* strip() const override { return base_->strip(); }
     Type* base() const { return base_.get(); }
+    TypePtr basePtr() const { return base_; }
 
 private:
     TypePtr base_;

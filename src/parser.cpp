@@ -70,15 +70,25 @@ TypePtr Parser::lookupTypeName(std::string_view name) {
 }
 
 Token Parser::peek() {
-    Token t1 = next();
-    Token t2 = cur();
-    pp_.putBack(t1);
-    return t2;
+    return peek(1);
+}
+
+Token Parser::peek(int n) {
+    std::vector<Token> tokens;
+    for (int i = 0; i < n; ++i) {
+        tokens.push_back(next());
+    }
+    Token target = cur();
+    for (int i = (int)tokens.size() - 1; i >= 0; --i) {
+        pp_.putBack(tokens[i]);
+    }
+    return target;
 }
 
 bool Parser::isTypeName(const Token& tok) {
     if (!tok.is(TokenKind::Identifier)) return false;
-    return lookupTypeName(tok.text) != nullptr;
+    bool found = lookupTypeName(tok.text) != nullptr;
+    return found;
 }
 
 bool Parser::isStartOfDeclaration() {
@@ -109,7 +119,6 @@ bool Parser::isStartOfDeclaration(const Token& t) {
     case TokenKind::Kw_unsigned:
     case TokenKind::Kw_void:
     case TokenKind::Kw_volatile:
-    case TokenKind::Kw_while:
     case TokenKind::Kw__Bool:
     case TokenKind::Kw_bool:
     case TokenKind::Kw_class:
@@ -131,10 +140,28 @@ bool Parser::isStartOfDeclaration(const Token& t) {
 }
 
 bool Parser::isStartOfParameterList() {
-    Token t2 = peek();
+    Token t2 = peek(1);
     if (t2.is(TokenKind::RParen)) return true;
     if (t2.is(TokenKind::Ellipsis)) return true;
-    return isStartOfDeclaration(t2);
+    
+    if (isStartOfDeclaration(t2)) {
+        // Ambiguity: Type(Expr) vs Type(Declarator)
+        // If we see Type(Literal) or Type(Op), it's likely a functional cast (expression)
+        if (peek(2).is(TokenKind::LParen)) {
+            Token t3 = peek(3);
+            if (!isStartOfDeclaration(t3) && 
+                t3.isNot(TokenKind::RParen) && 
+                t3.isNot(TokenKind::LParen) &&
+                t3.isNot(TokenKind::Star) && 
+                t3.isNot(TokenKind::Amp) &&
+                t3.isNot(TokenKind::AmpAmp) &&
+                t3.isNot(TokenKind::Tilde)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 // ============================================================
@@ -451,8 +478,11 @@ TypePtr Parser::parseTypeSpecifier(DeclSpec& ds) {
                 }
             }
             TypePtr ty = lookupTypeName(name);
-            if (ty) baseType = ty;
-            else     baseType = types_.intTy();
+            if (ty) {
+                baseType = ty;
+            } else {
+                baseType = types_.intTy();
+            }
             running = false;
             break;
         }
@@ -691,6 +721,7 @@ TypePtr Parser::parseFunctionSuffix(TypePtr base, std::string& nameOut) {
 
     // Function parameter list suffix
     if (cur().is(TokenKind::LParen) && isStartOfParameterList()) {
+        // std::cerr << "DEBUG: Parsing function parameter list for " << nameOut << std::endl;
         next(); // consume '('
         std::vector<ParamInfo> params;
         bool variadic = false;
@@ -873,6 +904,16 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
         SourceLocation memberLoc = cur().loc;
 
         // Handle constructor/destructor (no return type)
+        bool isVirtual = false;
+        if (cur().is(TokenKind::Kw_virtual)) {
+            // Check if followed by dtor (~Foo) or ctor (Foo() - peek(2) for '(')
+            if (peek().is(TokenKind::Tilde) || 
+               (peek().is(TokenKind::Identifier) && peek().text == rd->name && peek(2).is(TokenKind::LParen))) {
+                isVirtual = true;
+                next();
+            }
+        }
+        
         bool isDtor = cur().is(TokenKind::Tilde);
         if (isDtor || (cur().is(TokenKind::Identifier) && cur().text == rd->name && peek().is(TokenKind::LParen))) {
             if (isDtor) next(); // consume ~
@@ -881,11 +922,24 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
                 TypePtr fnType = parseDeclarator(types_.voidTy(), methodName);
                 if (isDtor) methodName = "~" + methodName;
 
-                DeclSpec emptyDS;
-                auto fd = parseFunctionDecl(emptyDS, fnType, methodName, memberLoc);
+                DeclSpec ds;
+                ds.isVirtual = isVirtual;
+                auto fd = parseFunctionDecl(ds, fnType, methodName, memberLoc);
                 fd->isConstructor = !isDtor;
                 fd->isDestructor = isDtor;
-                fd->isVirtual = true; // Constructor/Destructor with virtual prefix (destructor only)
+                fd->isVirtual = ds.isVirtual;
+                
+                if (fd->isDestructor && !fd->isVirtual) {
+                    // C++: Propagate virtuality from base class destructors
+                    for (const auto& base : recType->baseClasses()) {
+                        const MethodInfo* baseDtor = base->findDestructor();
+                        if (baseDtor && baseDtor->isVirtual) {
+                            fd->isVirtual = true;
+                            break;
+                        }
+                    }
+                }
+                
                 fd->parentRecordType = rd->recordType;
 
                 MethodInfo mi;
@@ -894,6 +948,7 @@ Ptr<RecordDecl> Parser::parseRecordDecl(TypeKind k) {
                 mi.parent = rd->recordType;
                 mi.isConstructor = fd->isConstructor;
                 mi.isDestructor = fd->isDestructor;
+                mi.isVirtual = fd->isVirtual;
                 recType->addMethod(mi);
 
                 rd->members.push_back(std::move(fd));

@@ -90,6 +90,7 @@ private:
     Token  cur()  { return pp_.peek(); }
     Token  next() { return pp_.next(); }
     Token  peek(); // peek at token after cur()
+    Token  peek(int n); // peek n tokens ahead (1 = next token)
     Token  consume(TokenKind k, const char* msg);
     bool   check(TokenKind k) { return cur().is(k); }
     bool   match(TokenKind k);

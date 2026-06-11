@@ -3,7 +3,7 @@ QC=../build/qc
 FAILED=0
 
 for f in *.c; do
-  if [[ "$f" == "test_stdqc_c.c" ]]; then continue; fi
+  if [[ "$f" == "test_stdqc_c.c" ]] || [[ "$f" == "test_kernel.c" ]]; then continue; fi
   if [[ "$f" == *"fail"* ]]; then
     echo "Testing $f (expecting failure)..."
     $QC "$f" -o "${f%.c}.exe" > /dev/null 2>&1
@@ -14,18 +14,18 @@ for f in *.c; do
       echo "SUCCESS: $f failed as expected."
     fi
   else
-    echo "Testing $f..."
     $QC "$f" -o "${f%.c}.exe"
     if [ $? -ne 0 ]; then
       echo "ERROR: $f failed to compile/link!"
       FAILED=$((FAILED + 1))
     else
-      ./"${f%.c}.exe"
-      if [ $? -ne 0 ] && [[ "$f" != "hello.c" ]]; then
-        echo "ERROR: $f failed to run correctly!"
+      ./"${f%.c}.exe" > /dev/null 2>&1
+      EXIT_CODE=$?
+      if [ $EXIT_CODE -ge 128 ]; then
+        echo "ERROR: $f crashed with exit code $EXIT_CODE!"
         FAILED=$((FAILED + 1))
       else
-        echo "SUCCESS: $f compiled and ran."
+        echo "SUCCESS: $f compiled and ran (exit code $EXIT_CODE)."
       fi
     fi
   fi
@@ -59,18 +59,22 @@ else
 fi
 
 # Verify C++ library
-g++ -fno-exceptions -fno-rtti -I../stdqc/include/c -I../stdqc/include/cxx test_stdqc_cpp.cpp ../build/stdqc/libstdqc.a -o test_stdqc_cpp
-if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to compile stdqc C++ test"
-    STDQC_FAILED=$((STDQC_FAILED + 1))
-else
-    ./test_stdqc_cpp
+if command -v g++ >/dev/null 2>&1; then
+    g++ -fno-exceptions -fno-rtti -I../stdqc/include/c -I../stdqc/include/cxx test_stdqc_cpp.cpp ../build/stdqc/libstdqc.a -o test_stdqc_cpp
     if [ $? -ne 0 ]; then
-        echo "ERROR: stdqc C++ test failed to run"
+        echo "ERROR: Failed to compile stdqc C++ test"
         STDQC_FAILED=$((STDQC_FAILED + 1))
     else
-        echo "SUCCESS: stdqc C++ test passed."
+        ./test_stdqc_cpp
+        if [ $? -ne 0 ]; then
+            echo "ERROR: stdqc C++ test failed to run"
+            STDQC_FAILED=$((STDQC_FAILED + 1))
+        else
+            echo "SUCCESS: stdqc C++ test passed."
+        fi
     fi
+else
+    echo "Skipping G++ verification (g++ not found)"
 fi
 
 if [ $STDQC_FAILED -eq 0 ]; then

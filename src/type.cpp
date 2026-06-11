@@ -9,7 +9,7 @@ namespace qc {
 // Type::isInteger / isFloat
 // ============================================================
 bool Type::isInteger() const {
-    switch (kind()) {
+    switch (strip()->kind()) {
     case TypeKind::Bool:
     case TypeKind::Char: case TypeKind::SChar: case TypeKind::UChar:
     case TypeKind::Short: case TypeKind::UShort:
@@ -24,7 +24,7 @@ bool Type::isInteger() const {
 }
 
 bool Type::isSigned() const {
-    switch (kind()) {
+    switch (strip()->kind()) {
     case TypeKind::Char: case TypeKind::SChar:
     case TypeKind::Short:
     case TypeKind::Int:
@@ -38,7 +38,7 @@ bool Type::isSigned() const {
 }
 
 bool Type::isFloat() const {
-    switch (kind()) {
+    switch (strip()->kind()) {
     case TypeKind::Float: case TypeKind::Double: case TypeKind::LongDouble:
         return true;
     default:
@@ -272,16 +272,25 @@ void RecordType::finalize() {
                 bool overridden = false;
                 for (auto& vt : vtables_) {
                     for (auto& ve : vt.entries) {
-                        if (ve.method->name == m.name) {
+                        bool nameMatch = (ve.method->name == m.name);
+                        bool dtorMatch = (ve.method->isDestructor && m.isDestructor);
+                        
+                        if (nameMatch || dtorMatch) {
                             ve.method = &m;
                             overridden = true;
-                            // For now we override ALL VTables that have this method
                         }
                     }
                 }
                 if (!overridden && !vtables_.empty()) {
                     // New virtual function in this class
-                    vtables_[0].entries.push_back({&m, (int)vtables_[0].entries.size()});
+                    if (m.isDestructor) {
+                        // Slot 0: Complete object destructor
+                        vtables_[0].entries.push_back({&m, (int)vtables_[0].entries.size(), false});
+                        // Slot 1: Deleting destructor
+                        vtables_[0].entries.push_back({&m, (int)vtables_[0].entries.size(), true});
+                    } else {
+                        vtables_[0].entries.push_back({&m, (int)vtables_[0].entries.size(), false});
+                    }
                 }
             }
         }
@@ -295,6 +304,8 @@ void RecordType::finalize() {
 }
 
 int RecordType::fieldIndex(std::string_view name) const {
+    assert(this != nullptr && "RecordType is null");
+    assert(kind_ == TypeKind::Struct || kind_ == TypeKind::Union || kind_ == TypeKind::Class);
     for (size_t i = 0; i < fields_.size(); ++i) {
         if (fields_[i].name == name) return (int)i;
     }
@@ -315,8 +326,37 @@ const MethodInfo* RecordType::findConstructor(const std::vector<TypePtr>& argTyp
 
         auto* ft = static_cast<FunctionType*>(m.type.get());
         if (ft->params().size() == argTypes.size()) {
-            // Simple match for now: number of arguments
             return &m;
+        }
+    }
+    return nullptr;
+}
+
+const MethodInfo* RecordType::findCopyConstructor() const {
+    for (const auto& m : methods_) {
+        if (!m.isConstructor) continue;
+        auto* ft = static_cast<FunctionType*>(m.type.get());
+        if (ft->params().size() != 1) continue;
+        
+        Type* paramTy = stripQuals(ft->params()[0].type.get());
+        if (paramTy->kind() == TypeKind::Reference) {
+            Type* pointee = stripQuals(static_cast<PointerType*>(paramTy)->pointee());
+            if (pointee == this) return &m;
+        }
+    }
+    return nullptr;
+}
+
+const MethodInfo* RecordType::findMoveConstructor() const {
+    for (const auto& m : methods_) {
+        if (!m.isConstructor) continue;
+        auto* ft = static_cast<FunctionType*>(m.type.get());
+        if (ft->params().size() != 1) continue;
+        
+        Type* paramTy = stripQuals(ft->params()[0].type.get());
+        if (paramTy->kind() == TypeKind::RValueRef) {
+            Type* pointee = stripQuals(static_cast<PointerType*>(paramTy)->pointee());
+            if (pointee == this) return &m;
         }
     }
     return nullptr;
@@ -457,7 +497,7 @@ bool typeEqual(const Type* a, const Type* b) {
     while (sb && sb->kind() == TypeKind::Qualified)
         sb = static_cast<const QualType*>(sb)->base();
 
-    if (!sa || !sb) return false;
+    if (!sa || !sb) return sa == sb;
     if (sa->kind() != sb->kind()) return false;
 
     switch (sa->kind()) {
@@ -508,13 +548,13 @@ bool typeEqual(const Type* a, const Type* b) {
     case TypeKind::Class: {
         const auto* ra = static_cast<const RecordType*>(sa);
         const auto* rb = static_cast<const RecordType*>(sb);
-        return ra == rb; // Nominal equality for records
+        return ra == rb;
     }
 
     case TypeKind::Enum: {
         const auto* ea = static_cast<const EnumType*>(sa);
         const auto* eb = static_cast<const EnumType*>(sb);
-        return ea == eb; // Nominal equality for enums
+        return ea == eb;
     }
 
     default:

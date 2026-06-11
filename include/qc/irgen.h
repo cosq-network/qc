@@ -31,6 +31,8 @@ private:
     void genContinueStmt();
     void genGotoStmt(const GotoStmt* s);
     void genLabelStmt(const LabelStmt* s);
+    void genTryStmt(const TryStmt* s);
+    void genThrowStmt(const ThrowStmt* s);
 
     // --- Expressions ---
     IRValue genExpr(const Expr* e);
@@ -53,11 +55,16 @@ private:
     IRValue genNewExpr(const NewExpr* e);
     IRValue genDeleteExpr(const DeleteExpr* e);
     void    genVTable(RecordType* rt);
+    void    genDeletingDestructor(TypePtr rt, const MethodInfo* method);
     IRValue genInitList(const InitListExpr* e, IRValue dest);
+
+    IRValue genCallInstr(TypePtr retTy, IRValue fn, std::vector<IRValue> args);
+    IRValue genVirtualCall(const RecordType* rt, const MethodInfo* method, IRValue basePtr, std::vector<IRValue> args, bool isDeletingDestructor = false);
 
     // --- Helpers ---
     std::string mangle(const FuncDecl* d);
     std::string mangleMethod(const RecordType* parent, const MethodInfo* method);
+    std::string mangleDeletingDestructor(const RecordType* parent);
     IRValue  coerce(IRValue v, Type* from, Type* to);
     IRValue  boolify(IRValue v);
     IROpcode selectIntCmp(BinaryOp op, bool isSigned);
@@ -70,7 +77,7 @@ private:
 
     void enterLoop(IRBlock* cont, IRBlock* brk);
     void exitLoop();
-    struct LoopCtx { IRBlock* cont; IRBlock* brk; };
+    struct LoopCtx { IRBlock* cont; IRBlock* brk; size_t cleanupDepth; };
 
     TypeContext&       types_;
     [[maybe_unused]] DiagEngine& diag_;
@@ -86,9 +93,13 @@ private:
     };
     std::vector<std::vector<Cleanup>> cleanupStack_;
 
-    void pushScope() { cleanupStack_.emplace_back(); }
+    void pushScope();
     void popScope();
     void emitPopScope(); // emit destructors for current scope without popping
+    void emitCleanupsToDepth(size_t depth);
+
+    void beginFullExpr() { fullExprCleanups_.clear(); }
+    void endFullExpr();
 
     std::unordered_map<const Decl*, IRValue> varMap_;
     IRValue thisAlloca_;
@@ -99,6 +110,9 @@ private:
 
     std::vector<LoopCtx>   loopStack_;
     std::vector<IRBlock*>  switchBreaks_;
+    std::vector<Cleanup>   fullExprCleanups_;
+    IRBlock*               curUnwindBlock_ = nullptr;
+    std::vector<IRBlock*>  unwindStack_;
 
     u32 labelCounter_  = 0;
     u32 stringCounter_ = 0;

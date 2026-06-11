@@ -4,16 +4,25 @@
 
 ## Current State
 
-`qc` has evolved from a basic C subset to a capable freestanding C/C++ toolchain. It can now compile complex C11 code and significant C++ object-oriented code, including polymorphism and RAII.
+`qc` has evolved from a basic C subset to a capable freestanding C/C++ toolchain. It can now compile complex C11 code and significant C++ object-oriented code, including polymorphism and RAII. The toolchain is verified to work on Linux and macOS (including ARM64 syscall support), and has an automated CI/CD pipeline for multi-platform distribution.
 
 **Key Features:**
 *   **C11 Support**: Standard C constructs, `_Generic`, static assertions, and atomic-like patterns.
 *   **Advanced C++ support**:
     *   Classes with RAII (Constructors/Destructors).
+    *   Virtual Destructors and correct destruction order in hierarchies.
+    *   Temporary Object Lifetimes (cleanups at full-expression boundaries).
+    *   Copy and Move Semantics (Resource transfers).
     *   Single and Multiple Inheritance (Field and VTable layout).
     *   Dynamic Dispatch via VTables (Virtual and Overridden functions).
+    *   Foundational Exception Handling (`try`/`catch` syntax and `invoke`/`landingpad` IR).
     *   Pure Virtual Functions and Abstract Class validation.
     *   Member and Global `operator new`/`delete` overloads.
+*   **Toolchain & CI/CD**:
+    *   **Multi-platform CodeGen**: Targets `aarch64` (ARM64) and `x86_64` (x64) with direct ELF (`.o`) and PE (`.obj`) emission.
+    *   **Cross-platform Support**: Native assembly and syscall support for Linux and macOS.
+    *   **Automated Packaging**: CPack integration for `.deb`, `.rpm`, `.dmg`, `.zip`, and `.exe` installers.
+    *   **GitHub Actions**: Automated build, test, and release pipeline with semantic versioning.
 *   **Standard Library (stdqc)**:
     *   Freestanding C library with core `string.h` and `memory.h` routines.
     *   C++ Standard Library headers: `<vector>`, `<string>`, `<utility>`, `<algorithm>`, and `<new>`.

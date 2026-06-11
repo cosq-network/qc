@@ -63,10 +63,14 @@ enum class IROpcode {
     Unreachable,
     // Calls
     Call,       // dst = call fn(args...)
+    Invoke,     // invoke fn(args...) to normal_label unwind landing_pad
     // Phi (for SSA)
     Phi,
     // Address
     GEP,        // dst = gep base, [indices...]
+    // Exception Handling
+    LandingPad, // dst = landingpad
+    Resume,     // resume
     // Intrinsics
     MemCopy, MemSet,
 };
@@ -171,7 +175,11 @@ public:
     IRValue cast(IROpcode op, TypePtr dstTy, IRValue val);
 
     IRValue call(TypePtr retTy, IRValue fn, std::vector<IRValue> args);
+    IRValue invoke(TypePtr retTy, IRValue fn, std::vector<IRValue> args, IRBlock* normal, IRBlock* unwind);
     IRValue gep(TypePtr elemTy, IRValue base, std::vector<IRValue> idx);
+
+    void    landingpad(IRValue dst);
+    void    resume(IRValue val);
 
     void    br(IRBlock* target);
     void    condBr(IRValue cond, IRBlock* trueB, IRBlock* falseB);
@@ -183,9 +191,10 @@ public:
 
     bool    hasTerminator() const;
 
+    IRValue  newReg(TypePtr ty);
+
 private:
     IRInstr& emit(IRInstr instr);
-    IRValue  newReg(TypePtr ty);
 
     IRFunction* fn_ = nullptr;
     IRBlock*    bb_ = nullptr;

@@ -131,9 +131,7 @@ class ARM64CodeGen : public CodeGen {
 public:
     explicit ARM64CodeGen(const TargetInfo& target, DiagEngine& diag)
         : target_(target), diag_(diag) {
-        // Only use underscore prefix for systems that expect it (like Mach-O or Windows PE)
-        // For now, we only support ELF and PE. ELF typically does not use underscores.
-        isMachO_ = (target_.format == TargetFormat::PE); 
+        isMachO_ = (target_.os == TargetOS::MacOS);
     }
 
     void compile(const IRModule& mod) override;
@@ -563,12 +561,26 @@ void ARM64CodeGen::emitCall(const IRInstr& ins, ARM64FuncCtx& ctx) {
 }
 
 void ARM64CodeGen::emitGEP(const IRInstr& ins, ARM64FuncCtx& ctx) {
-    // Extremely simplified GEP
     u32 base = loadGPR(ins.srcs[0], ctx, REG_X9);
     u32 off  = loadGPR(ins.srcs[1], ctx, REG_X10);
     u32 dst  = REG_X9;
 
-    ctx.emitInst("add " + std::string(xRegName(dst)) + ", " + xRegName(base) + ", " + xRegName(off));
+    u32 elemSize = ins.opType ? ins.opType->size() : 1;
+    if (elemSize == 1) {
+        ctx.emitInst("add " + std::string(xRegName(dst)) + ", " + xRegName(base) + ", " + xRegName(off));
+    } else if (elemSize == 2) {
+        ctx.emitInst("add " + std::string(xRegName(dst)) + ", " + xRegName(base) + ", " + xRegName(off) + ", lsl #1");
+    } else if (elemSize == 4) {
+        ctx.emitInst("add " + std::string(xRegName(dst)) + ", " + xRegName(base) + ", " + xRegName(off) + ", lsl #2");
+    } else if (elemSize == 8) {
+        ctx.emitInst("add " + std::string(xRegName(dst)) + ", " + xRegName(base) + ", " + xRegName(off) + ", lsl #3");
+    } else {
+        // Fallback for larger sizes: multiply then add
+        u32 scratch = REG_X11;
+        ctx.emitInst("mov " + std::string(xRegName(scratch)) + ", #" + std::to_string(elemSize));
+        ctx.emitInst("mul " + std::string(xRegName(scratch)) + ", " + xRegName(off) + ", " + xRegName(scratch));
+        ctx.emitInst("add " + std::string(xRegName(dst)) + ", " + xRegName(base) + ", " + xRegName(scratch));
+    }
     ctx.emitInst("str " + std::string(xRegName(dst)) + ", " + spOff(ctx.spillSlots[ins.dst.id]));
 }
 
@@ -619,7 +631,7 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
     // .data
     bool hasData = false;
     for (auto& g : globOutputs_) {
-        if (!g.isZeroInit && !g.isConst && (!g.initData.empty() || g.hasStringInit)) {
+        if (!g.isZeroInit && !g.isConst && (!g.initData.empty() || g.hasStringInit || !g.symbolInits.empty())) {
             if (!hasData) {
                 if (isMachO_) fprintf(out, "\n.section __DATA,__data\n");
                 else          fprintf(out, "\n.section .data\n");
@@ -627,11 +639,23 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
             }
             std::string symName = g.name;
             if (isMachO_) symName = "_" + symName;
+            u32 align = g.align > 0 ? g.align : 1;
+            fprintf(out, "    .balign %u\n", align);
             fprintf(out, ".global %s\n%s:\n", symName.c_str(), symName.c_str());
             if (g.hasStringInit) {
                 std::string s = g.stringInit;
                 if (s.size() >= 2 && s.front() == '"' && s.back() == '"') s = s.substr(1, s.size() - 2);
                 fprintf(out, "    .ascii \"%s\"\n    .byte 0\n", s.c_str());
+            } else if (!g.symbolInits.empty()) {
+                for (const auto& sym : g.symbolInits) {
+                    if (sym == "0") {
+                        fprintf(out, "    .quad 0\n");
+                    } else {
+                        std::string s = sym;
+                        if (isMachO_) s = "_" + s;
+                        fprintf(out, "    .quad %s\n", s.c_str());
+                    }
+                }
             } else {
                 fprintf(out, "    .byte");
                 for (size_t i = 0; i < g.initData.size(); ++i)
@@ -652,6 +676,8 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
             }
             std::string symName = g.name;
             if (isMachO_) symName = "_" + symName;
+            u32 align = g.align > 0 ? g.align : 1;
+            fprintf(out, "    .balign %u\n", align);
             fprintf(out, ".global %s\n%s:\n    .zero %u\n", symName.c_str(), symName.c_str(), g.size);
         }
     }
@@ -667,6 +693,8 @@ void ARM64CodeGen::emitAssembly(FILE* out) {
             }
             std::string symName = g.name;
             if (isMachO_) symName = "_" + symName;
+            u32 align = g.align > 0 ? g.align : 1;
+            fprintf(out, "    .balign %u\n", align);
             fprintf(out, ".global %s\n%s:\n", symName.c_str(), symName.c_str());
             if (g.hasStringInit) {
                 std::string s = g.stringInit;

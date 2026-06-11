@@ -48,6 +48,10 @@ set_target_properties(qbios PROPERTIES IMPORTED_LOCATION ${QBIOS_LIB})
 set_target_properties(qbios PROPERTIES INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_dependencies(qbios qbios_build)
 
+# Install rules
+install(FILES ${QBIOS_LIB} DESTINATION lib)
+install(DIRECTORY include/qbios/ DESTINATION include/qbios)
+
 # Tests (optional)
 # NOTE: Disabled because 'qc' natively outputs ELF/PE objects. On macOS, the host
 # linker expects Mach-O objects and will fail to link test_qbios natively.

@@ -114,6 +114,7 @@ struct TernaryExpr : Expr {
 struct CallExpr : Expr {
     ExprPtr              callee;
     std::vector<ExprPtr> args;
+    const MethodInfo*    constructor = nullptr; // resolved by sema if functional cast
     ExprKind kind() const override { return ExprKind::Call; }
 };
 

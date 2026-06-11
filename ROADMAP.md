@@ -7,7 +7,9 @@ This document outlines the planned development for the `qc` compiler and its ass
 *   [x] Base Constructor Calls
 *   [x] Pure Virtual Functions & Abstract Classes
 *   [x] Basic Multiple Inheritance (VTable offsets)
-*   [ ] **Virtual Destructors**: Implement correct destruction order and VTable entries for destructors.
+*   [x] **Advanced RAII**: Temporary lifetimes and Copy/Move semantics.
+*   [x] **Foundational Exception Handling**: `try`/`catch` syntax and `invoke`/`landingpad` IR.
+*   [x] **Virtual Destructors**: Implement correct destruction order and VTable entries for destructors.
 *   [ ] **Thunks**: Implement `this` pointer adjustment thunks for multiple inheritance overrides.
 *   [ ] **Explicit Base Initialization**: Support `: Base(args)` syntax in constructors.
 *   [ ] **Dynamic Cast & RTTI**: Implement basic `typeid` and `dynamic_cast` support.
@@ -19,10 +21,12 @@ This document outlines the planned development for the `qc` compiler and its ass
 *   [ ] **SFINAE**: Implement basic substitution failure patterns.
 
 ## Phase 7: Toolchain & Infrastructure
+*   [x] **CI/CD Pipeline**: Automated GitHub Actions with multi-platform builds and semantic versioning.
+*   [x] **Packaging**: CPack integration for distribution (Linux, macOS, Windows).
 *   [ ] **Linker Integration**: Built-in support for invoking `ld.lld` or `link.exe` directly from `qc`.
 *   [ ] **Standard Library Expansion (stdqc)**:
     *   Add `<map>` and `<unordered_map>`.
-    *   Implement basic exception handling (freestanding-safe).
+    *   Implement high-level exception handling runtime (freestanding-safe).
     *   Expand `string.h` and `stdio.h` implementations.
 *   [ ] **Optimization Passes**:
     *   Constant Folding (IR level).
@@ -41,3 +45,7 @@ This document outlines the planned development for the `qc` compiler and its ass
 *   **Phase 3**: RAII (Constructors/Destructors) and scope management.
 *   **Phase 4**: Basic Containers (`vector`, `string`) for `stdqc`.
 *   **Phase 5 (Initial)**: Polymorphism, VTables, and Multiple Inheritance.
+*   **Phase 5 (Advanced RAII)**: Temporary lifetimes, Copy/Move semantics, and EH IR infrastructure.
+*   **Phase 5 (Virtual Destructors)**: Correct destruction order and deleting destructor thunks.
+*   **Phase 7 (Initial Infrastructure)**: Multi-platform CI/CD, CPack distribution, and macOS ARM64 syscall support.
+

@@ -33,10 +33,10 @@
         - Registers the destructor in the current scope's cleanup list.
 
 ## Remaining Tasks
-1. **Fix Parser Ambiguity**: Resolve why `RAII a(1);` is being parsed as a function declaration or failing.
-2. **Loop Cleanup**: Ensure `break` and `continue` correctly emit cleanups for scopes they exit.
-3. **Array Initializers**: Support constructors/destructors for arrays of objects.
-4. **Member Initializer Lists**: Support calling member constructors in class constructor definitions.
+1. [x] **Fix Parser Ambiguity**: Resolved by implementing multi-token lookahead in `isStartOfParameterList` to distinguish between functional casts and parameter declarations.
+2. [x] **Loop Cleanup**: Implemented `emitCleanupsToDepth` in `IRGen` to ensure `break` and `continue` correctly emit cleanups for scopes they exit.
+3. [ ] **Array Initializers**: Support constructors/destructors for arrays of objects.
+4. [ ] **Member Initializer Lists**: Support calling member constructors in class constructor definitions.
 
 ## Current Blockers
-- `tests/test_raii.cpp` fails to parse with `qc`.
+- None. All major parsing and basic RAII issues are resolved.

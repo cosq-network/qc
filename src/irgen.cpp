@@ -44,29 +44,89 @@ IRModule IRGen::generate(const TranslationUnit& tu) {
 
 void IRGen::genVTable(RecordType* rt) {
     if (!rt || rt->vtables().empty()) return;
-    
+
     for (size_t i = 0; i < rt->vtables().size(); ++i) {
         const auto& vt = rt->vtables()[i];
         std::string vtableName = rt->name() + "_vtable";
         if (i > 0) vtableName += std::to_string(i);
 
         if (mod_.findGlobal(vtableName)) continue;
-        
+
         IRGlobal g;
         g.name = vtableName;
-        g.isConst = true;
+        g.isConst = false;
+        g.align = 8;
         g.type = types_.arrayOf(types_.ptrTo(types_.voidTy()), (i64)vt.entries.size());
-        
+
         for (const auto& ve : vt.entries) {
+            if (!ve.method) {
+                g.symbolInits.push_back("0");
+                continue;
+            }
             if (ve.method->isPureVirtual) {
                 g.symbolInits.push_back("0");
+            } else if (ve.isDeletingDestructor) {
+                std::string dtorName = mangleDeletingDestructor(static_cast<const RecordType*>(ve.method->parent.get()));
+                g.symbolInits.push_back(dtorName);
+                genDeletingDestructor(ve.method->parent, ve.method);
             } else {
                 g.symbolInits.push_back(mangleMethod(static_cast<const RecordType*>(ve.method->parent.get()), ve.method));
             }
         }
-        
+
         mod_.globals.push_back(std::move(g));
     }
+}
+
+void IRGen::genDeletingDestructor(TypePtr rt, const MethodInfo* method) {
+    if (!rt) return;
+    std::string mangledName = mangleDeletingDestructor(static_cast<const RecordType*>(rt.get()));
+    if (mod_.findFunction(mangledName)) return;
+
+    IRFunction irfn;
+    irfn.name = mangledName;
+    irfn.retType = types_.voidTy();
+    irfn.params.push_back({"this", types_.ptrTo(rt), 0});
+    irfn.nextReg = 1;
+
+    IRFunction* prevFn = curFn_;
+    curFn_ = &irfn;
+    builder_.setFunction(&irfn);
+    
+    IRBlock* entry = builder_.newBlock("entry");
+    builder_.setBlock(entry);
+
+    IRValue thisPtr = IRValue::reg(irfn.params[0].type, 0);
+
+    // 1. Call normal destructor
+    std::string realDtorName = mangleMethod(static_cast<const RecordType*>(rt.get()), method);
+    IRValue dtorCallee = IRValue::global(types_.ptrTo(method->type), realDtorName);
+    genCallInstr(types_.voidTy(), dtorCallee, {thisPtr});
+
+    // 2. Call operator delete
+    auto* rec = static_cast<const RecordType*>(rt.get());
+    const MethodInfo* opDel = rec->findOperatorDelete();
+    std::string opDelName = "op_delete";
+    if (opDel) opDelName = mangleMethod(static_cast<const RecordType*>(opDel->parent.get()), opDel);
+    
+    if (!mod_.findFunction(opDelName)) {
+        IRFunction fn;
+        fn.name = opDelName;
+        fn.retType = types_.voidTy();
+        fn.params.push_back({"ptr", types_.ptrTo(types_.voidTy()), 0});
+        fn.isExtern = true;
+        mod_.functions.push_back(std::move(fn));
+    }
+    
+    IRValue opDelCallee = IRValue::global(types_.ptrTo(types_.voidTy()), opDelName);
+    IRValue voidPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.voidTy()), thisPtr);
+    genCallInstr(types_.voidTy(), opDelCallee, {voidPtr});
+
+    builder_.ret();
+
+    mod_.functions.push_back(std::move(irfn));
+    curFn_ = prevFn;
+    builder_.setFunction(curFn_);
 }
 
 
@@ -158,13 +218,28 @@ void IRGen::genVarDecl(const VarDecl* d) {
     if (d->constructor) {
         std::vector<IRValue> args;
         args.push_back(ptr); // this
-        for (auto& arg : d->args) {
-            args.push_back(genExpr(arg.get()));
+        if (d->args.empty() && d->init) {
+            // Copy/Move constructor: pass address of initializer
+            if (d->init->isLValue) {
+                args.push_back(genLValue(d->init.get()));
+            } else {
+                // RValue: genExpr returns the value, we might need a temporary if it's not already in memory
+                // but genExpr for record types usually returns the loaded value.
+                // Actually, passing by reference to constructor needs an address.
+                IRValue val = genExpr(d->init.get());
+                IRValue temp = builder_.makeAlloca(d->init->type, "copy.temp");
+                builder_.store(val, temp);
+                args.push_back(temp);
+            }
+        } else {
+            for (auto& arg : d->args) {
+                args.push_back(genExpr(arg.get()));
+            }
         }
         
         std::string mangledName = mangleMethod(static_cast<const RecordType*>(d->constructor->parent.get()), d->constructor);
         IRValue callee = IRValue::global(types_.ptrTo(d->constructor->type), mangledName);
-        builder_.call(types_.voidTy(), callee, std::move(args));
+        genCallInstr(types_.voidTy(), callee, std::move(args));
     }
 
     // Destructor registration
@@ -175,11 +250,23 @@ void IRGen::genVarDecl(const VarDecl* d) {
         cleanupStack_.back().push_back(c);
     }
 
-    if (d->init) {
+    if (d->init && !d->constructor) {
+        beginFullExpr();
         IRValue val = genExpr(d->init.get());
         if (d->type) val = coerce(val, val.type ? val.type.get() : nullptr, d->type.get());
         builder_.store(val, ptr);
+        endFullExpr();
     }
+}
+
+IRValue IRGen::genCallInstr(TypePtr retTy, IRValue fn, std::vector<IRValue> args) {
+    if (curUnwindBlock_) {
+        IRBlock* normal_bb = builder_.newBlock(makeLabel("invoke.cont"));
+        IRValue res = builder_.invoke(retTy, fn, std::move(args), normal_bb, curUnwindBlock_);
+        builder_.setBlock(normal_bb);
+        return res;
+    }
+    return builder_.call(retTy, fn, std::move(args));
 }
 
 std::string IRGen::mangle(const FuncDecl* d) {
@@ -205,6 +292,10 @@ std::string IRGen::mangleMethod(const RecordType* parent, const MethodInfo* meth
     else if (name == "operator new[]") name = "op_new_array";
     else if (name == "operator delete[]") name = "op_delete_array";
     return parent->name() + "_" + name;
+}
+
+std::string IRGen::mangleDeletingDestructor(const RecordType* parent) {
+    return parent->name() + "_deleting_destructor";
 }
 
 void IRGen::genFuncDecl(const FuncDecl* d) {
@@ -272,6 +363,11 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
 
     curFn_ = irfn;
 
+    // Ensure nextReg is at least as large as the number of parameters
+    if (irfn->nextReg < irfn->params.size()) {
+        irfn->nextReg = irfn->params.size();
+    }
+
     if (!d->body) {
         // Declaration only — no body to generate.
         curFn_ = nullptr;
@@ -309,7 +405,8 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
                 IRValue adjustedPtr = builder_.gep(types_.charTy(), rawPtr, { offVal });
                 basePtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(baseCtor->parent), adjustedPtr);
             }
-            builder_.call(types_.voidTy(), baseCtorVal, {basePtr});
+            builder_.setLoc(d->loc);
+            genCallInstr(types_.voidTy(), baseCtorVal, {basePtr});
         }
     }
 
@@ -372,6 +469,32 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
 
     genStmt(d->body.get());
 
+    // C++: Call base destructors if this is a destructor
+    if (d->isDestructor && d->parentRecordType) {
+        const auto& bases = d->parentRecordType->baseClasses();
+        const auto& offsets = d->parentRecordType->baseOffsets();
+        for (int i = (int)bases.size() - 1; i >= 0; --i) {
+            const MethodInfo* baseDtor = bases[i]->findDestructor();
+            if (baseDtor) {
+                IRValue thisVal = builder_.load(types_.ptrTo(d->parentRecordType), thisAlloca_);
+                u32 offset = offsets[i];
+                IRValue basePtr = thisVal;
+                if (offset != 0) {
+                    IRValue offVal = IRValue::constant(types_.intTy(), (u64)offset);
+                    IRValue rawPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.charTy()), thisVal);
+                    IRValue adjusted = builder_.gep(types_.charTy(), rawPtr, { offVal });
+                    basePtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(bases[i]), adjusted);
+                } else {
+                    basePtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(bases[i]), thisVal);
+                }
+                
+                std::string mangledName = mangleMethod(bases[i].get(), baseDtor);
+                IRValue callee = IRValue::global(types_.ptrTo(baseDtor->type), mangledName);
+                genCallInstr(types_.voidTy(), callee, {basePtr});
+            }
+        }
+    }
+
     // Add implicit ret void if no terminator.
     if (!builder_.hasTerminator()) {
         emitPopScope();
@@ -388,9 +511,18 @@ void IRGen::genFuncDecl(const FuncDecl* d) {
     switchBreaks_.clear();
 }
 
+void IRGen::pushScope() {
+    cleanupStack_.emplace_back();
+    unwindStack_.push_back(curUnwindBlock_);
+}
+
 void IRGen::popScope() {
     emitPopScope();
     cleanupStack_.pop_back();
+    if (!unwindStack_.empty()) {
+        curUnwindBlock_ = unwindStack_.back();
+        unwindStack_.pop_back();
+    }
 }
 
 void IRGen::emitPopScope() {
@@ -406,6 +538,16 @@ void IRGen::emitPopScope() {
     }
 }
 
+void IRGen::endFullExpr() {
+    for (int i = (int)fullExprCleanups_.size() - 1; i >= 0; --i) {
+        auto& c = fullExprCleanups_[i];
+        std::string mangledName = mangleMethod(static_cast<const RecordType*>(c.destructor->parent.get()), c.destructor);
+        IRValue callee = IRValue::global(types_.ptrTo(c.destructor->type), mangledName);
+        builder_.call(types_.voidTy(), callee, { c.thisPtr });
+    }
+    fullExprCleanups_.clear();
+}
+
 // ============================================================
 // Statements
 // ============================================================
@@ -419,7 +561,11 @@ void IRGen::genStmt(const Stmt* s) {
             break;
         case StmtKind::Expr: {
             auto* es = static_cast<const ExprStmt*>(s);
-            if (es->expr) genExpr(es->expr.get());
+            if (es->expr) {
+                beginFullExpr();
+                genExpr(es->expr.get());
+                endFullExpr();
+            }
             break;
         }
         case StmtKind::Decl: {
@@ -459,6 +605,12 @@ void IRGen::genStmt(const Stmt* s) {
         case StmtKind::Label:
             genLabelStmt(static_cast<const LabelStmt*>(s));
             break;
+        case StmtKind::Try:
+            genTryStmt(static_cast<const TryStmt*>(s));
+            break;
+        case StmtKind::Throw:
+            genThrowStmt(static_cast<const ThrowStmt*>(s));
+            break;
         case StmtKind::Case:
         case StmtKind::Default: {
             // Handled inside genSwitchStmt; if encountered standalone just gen body.
@@ -485,8 +637,10 @@ void IRGen::genCompoundStmt(const CompoundStmt* s) {
 void IRGen::genIfStmt(const IfStmt* s) {
     if (!s) return;
 
+    beginFullExpr();
     IRValue cond = genExpr(s->cond.get());
     cond = boolify(cond);
+    endFullExpr();
 
     IRBlock* then_bb  = builder_.newBlock(makeLabel("then"));
     IRBlock* else_bb  = s->els ? builder_.newBlock(makeLabel("else")) : nullptr;
@@ -523,8 +677,10 @@ void IRGen::genWhileStmt(const WhileStmt* s) {
     builder_.br(header_bb);
 
     builder_.setBlock(header_bb);
+    beginFullExpr();
     IRValue cond = genExpr(s->cond.get());
     cond = boolify(cond);
+    endFullExpr();
     builder_.condBr(cond, body_bb, exit_bb);
 
     builder_.setBlock(body_bb);
@@ -556,8 +712,10 @@ void IRGen::genDoWhileStmt(const DoWhileStmt* s) {
     }
 
     builder_.setBlock(cond_bb);
+    beginFullExpr();
     IRValue cond = genExpr(s->cond.get());
     cond = boolify(cond);
+    endFullExpr();
     builder_.condBr(cond, body_bb, exit_bb);
 
     builder_.setBlock(exit_bb);
@@ -579,8 +737,10 @@ void IRGen::genForStmt(const ForStmt* s) {
     // Condition.
     builder_.setBlock(header_bb);
     if (s->cond) {
+        beginFullExpr();
         IRValue cond = genExpr(s->cond.get());
         cond = boolify(cond);
+        endFullExpr();
         builder_.condBr(cond, body_bb, exit_bb);
     } else {
         // Infinite loop (no condition).
@@ -598,7 +758,11 @@ void IRGen::genForStmt(const ForStmt* s) {
 
     // Step.
     builder_.setBlock(step_bb);
-    if (s->step) genExpr(s->step.get());
+    if (s->step) {
+        beginFullExpr();
+        genExpr(s->step.get());
+        endFullExpr();
+    }
     if (!builder_.hasTerminator()) {
         builder_.br(header_bb);
     }
@@ -711,19 +875,8 @@ void IRGen::genSwitchStmt(const SwitchStmt* s) {
     builder_.setBlock(exit_bb);
 }
 
-void IRGen::genReturnStmt(const ReturnStmt* s) {
-    if (!s) return;
-    IRValue retVal;
-    if (s->value) {
-        retVal = genExpr(s->value.get());
-        // Coerce to function return type if needed.
-        if (curFn_ && curFn_->retType && retVal.type) {
-            retVal = coerce(retVal, retVal.type.get(), curFn_->retType.get());
-        }
-    }
-
-    // Emit all cleanups
-    for (int i = (int)cleanupStack_.size() - 1; i >= 0; --i) {
+void IRGen::emitCleanupsToDepth(size_t depth) {
+    for (int i = (int)cleanupStack_.size() - 1; i >= (int)depth; --i) {
         auto& cleanups = cleanupStack_[i];
         for (int j = (int)cleanups.size() - 1; j >= 0; --j) {
             auto& c = cleanups[j];
@@ -732,6 +885,22 @@ void IRGen::genReturnStmt(const ReturnStmt* s) {
             builder_.call(types_.voidTy(), callee, { c.thisPtr });
         }
     }
+}
+
+void IRGen::genReturnStmt(const ReturnStmt* s) {
+    if (!s) return;
+    IRValue retVal;
+    if (s->value) {
+        beginFullExpr();
+        retVal = genExpr(s->value.get());
+        // Coerce to function return type if needed.
+        if (curFn_ && curFn_->retType && retVal.type) {
+            retVal = coerce(retVal, retVal.type.get(), curFn_->retType.get());
+        }
+        endFullExpr();
+    }
+
+    emitCleanupsToDepth(0);
 
     if (s->value) builder_.ret(retVal);
     else          builder_.ret();
@@ -742,22 +911,32 @@ void IRGen::genBreakStmt() {
     // Break exits the innermost loop or switch. When both are present,
     // the loop is innermost (it was entered after the switch).
     IRBlock* target = nullptr;
+    size_t depth = 0;
     if (!loopStack_.empty()) {
         target = loopStack_.back().brk;
+        depth = loopStack_.back().cleanupDepth;
     } else if (!switchBreaks_.empty()) {
         target = switchBreaks_.back();
+        // Switches don't push a scope themselves, so depth is current.
+        depth = cleanupStack_.size();
     }
-    if (target) builder_.br(target);
-    else builder_.unreachable();
+    
+    if (target) {
+        emitCleanupsToDepth(depth);
+        builder_.br(target);
+    } else {
+        builder_.unreachable();
+    }
 }
 
 void IRGen::genContinueStmt() {
-    IRBlock* target = nullptr;
     if (!loopStack_.empty()) {
-        target = loopStack_.back().cont;
+        auto& ctx = loopStack_.back();
+        emitCleanupsToDepth(ctx.cleanupDepth);
+        builder_.br(ctx.cont);
+    } else {
+        builder_.unreachable();
     }
-    if (target) builder_.br(target);
-    else builder_.unreachable();
 }
 
 void IRGen::genGotoStmt(const GotoStmt* s) {
@@ -789,6 +968,53 @@ void IRGen::genLabelStmt(const LabelStmt* s) {
     }
     builder_.setBlock(labelBlock);
     if (s->body) genStmt(s->body.get());
+}
+
+void IRGen::genTryStmt(const TryStmt* s) {
+    if (!s) return;
+
+    IRBlock* catch_bb = builder_.newBlock(makeLabel("try.catch"));
+    IRBlock* end_bb   = builder_.newBlock(makeLabel("try.end"));
+
+    IRBlock* prevUnwind = curUnwindBlock_;
+    curUnwindBlock_ = catch_bb;
+
+    if (s->body) genStmt(s->body.get());
+
+    curUnwindBlock_ = prevUnwind;
+    if (!builder_.hasTerminator()) {
+        builder_.br(end_bb);
+    }
+
+    builder_.setBlock(catch_bb);
+    // 1. Landing pad
+    TypePtr lpTy = types_.ptrTo(types_.voidTy()); 
+    IRValue lpVal = builder_.newReg(lpTy);
+    builder_.landingpad(lpVal);
+
+    // 2. Catch clauses
+    for (const auto& clause : s->catches) {
+        // Simplified: just gen first catch for now
+        if (clause.body) genStmt(clause.body.get());
+        if (!builder_.hasTerminator()) {
+            builder_.br(end_bb);
+        }
+    }
+
+    // Default resume if no catch matches or if we're not catching everything
+    if (!builder_.hasTerminator()) {
+        builder_.resume(lpVal);
+    }
+
+    builder_.setBlock(end_bb);
+}
+
+void IRGen::genThrowStmt(const ThrowStmt* s) {
+    if (s->value) {
+        // IRValue val = genExpr(s->value.get());
+        // Call __qc_throw(val, type) - Placeholder for now
+    }
+    builder_.unreachable();
 }
 
 // ============================================================
@@ -958,7 +1184,7 @@ IRValue IRGen::genNewExpr(const NewExpr* e) {
     }
     
     IRValue fnVal = IRValue::global(types_.ptrTo(types_.voidTy()), opName);
-    IRValue rawPtr = builder_.call(types_.ptrTo(types_.voidTy()), fnVal, {sizeVal});
+    IRValue rawPtr = genCallInstr(types_.ptrTo(types_.voidTy()), fnVal, {sizeVal});
     IRValue typedPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(e->allocType), rawPtr);
     
     // 3. Call constructor if resolved
@@ -970,7 +1196,7 @@ IRValue IRGen::genNewExpr(const NewExpr* e) {
             args.push_back(genExpr(arg.get()));
         }
         IRValue ctorVal = IRValue::global(types_.ptrTo(types_.voidTy()), ctorName);
-        builder_.call(types_.voidTy(), ctorVal, args);
+        genCallInstr(types_.voidTy(), ctorVal, args);
     }
     
     return typedPtr;
@@ -978,39 +1204,47 @@ IRValue IRGen::genNewExpr(const NewExpr* e) {
 
 IRValue IRGen::genDeleteExpr(const DeleteExpr* e) {
     if (!e->operand) return IRValue::voidVal();
-    
+
     IRValue ptr = genExpr(e->operand.get());
     if (ptr.type->kind() != TypeKind::Pointer) return IRValue::voidVal();
-    
+
     // 1. Call destructor if resolved
     if (e->destructor) {
         Type* pointee = stripQuals(static_cast<PointerType*>(ptr.type.get())->pointee());
         if (pointee->isRecord()) {
-             std::string dtorName = mangleMethod(static_cast<const RecordType*>(pointee), e->destructor);
-             IRValue dtorVal = IRValue::global(types_.ptrTo(types_.voidTy()), dtorName);
-             builder_.call(types_.voidTy(), dtorVal, {ptr});
+             auto* rt = static_cast<const RecordType*>(pointee);
+             if (e->destructor->isVirtual) {
+                 // Virtual delete: call the deleting destructor slot
+                 genVirtualCall(rt, e->destructor, ptr, {}, true);
+                 return IRValue::voidVal(); // Deleting destructor handles operator delete
+             } else {
+                 // Static delete: call normal destructor then operator delete
+                 std::string dtorName = mangleMethod(rt, e->destructor);
+                 IRValue dtorVal = IRValue::global(types_.ptrTo(e->destructor->type), dtorName);
+                 genCallInstr(types_.voidTy(), dtorVal, {ptr});
+             }
         }
     }
-    
-    // 2. Call operator delete
-    std::string opName = "op_delete";
+
+    // 2. Call operator delete (only for static delete or if no virtual destructor)
+    std::string opDelName = "op_delete";
     if (e->opDelete) {
-        opName = mangleMethod(static_cast<const RecordType*>(e->opDelete->parent.get()), e->opDelete);
+        opDelName = mangleMethod(static_cast<const RecordType*>(e->opDelete->parent.get()), e->opDelete);
     }
-    
-    if (!mod_.findFunction(opName)) {
+
+    if (!mod_.findFunction(opDelName)) {
         IRFunction fn;
-        fn.name = opName;
+        fn.name = opDelName;
         fn.retType = types_.voidTy();
         fn.params.push_back({"ptr", types_.ptrTo(types_.voidTy()), 0});
         fn.isExtern = true;
         mod_.functions.push_back(std::move(fn));
     }
-    
-    IRValue opDelVal = IRValue::global(types_.ptrTo(types_.voidTy()), opName);
+
+    IRValue opDelCallee = IRValue::global(types_.ptrTo(types_.voidTy()), opDelName);
     IRValue voidPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.voidTy()), ptr);
-    builder_.call(types_.voidTy(), opDelVal, {voidPtr});
-    
+    genCallInstr(types_.voidTy(), opDelCallee, {voidPtr});
+
     return IRValue::voidVal();
 }
 
@@ -1269,6 +1503,37 @@ IRValue IRGen::genTernary(const TernaryExpr* e) {
 IRValue IRGen::genCall(const CallExpr* e) {
     if (!e) return IRValue::voidVal();
 
+    if (e->constructor) {
+        TypePtr ty = e->type;
+        IRValue ptr = builder_.makeAlloca(ty, "temp.obj");
+        
+        std::vector<IRValue> args;
+        args.push_back(ptr); // this
+        for (auto& arg : e->args) {
+            args.push_back(genExpr(arg.get()));
+        }
+        
+        std::string mangledName = mangleMethod(static_cast<const RecordType*>(ty.get()), e->constructor);
+        IRValue callee = IRValue::global(types_.ptrTo(e->constructor->type), mangledName);
+        genCallInstr(types_.voidTy(), callee, std::move(args));
+        
+        // Register destructor for temporary
+        const MethodInfo* dtor = static_cast<const RecordType*>(ty.get())->findDestructor();
+        if (dtor) {
+            Cleanup c;
+            c.destructor = dtor;
+            c.thisPtr    = ptr;
+            fullExprCleanups_.push_back(c);
+        }
+        
+        // Return the pointer to the temporary. 
+        // We'll mark it as having the record type, but it's physically a pointer.
+        // This is a common pattern in qc for records.
+        IRValue res = ptr;
+        res.type = ty; 
+        return res;
+    }
+
     // Member call: obj.method() or ptr->method()
     if (e->callee && e->callee->kind() == ExprKind::Member) {
         auto* me = static_cast<const MemberExpr*>(e->callee.get());
@@ -1306,57 +1571,14 @@ IRValue IRGen::genCall(const CallExpr* e) {
         args.push_back(genExpr(arg.get()));
     }
 
-    return builder_.call(retTy, callee, std::move(args));
+    return genCallInstr(retTy, callee, std::move(args));
 }
 
 IRValue IRGen::genMemberCall(const CallExpr* e, IRValue basePtr, const MethodInfo* method) {
     if (method->isVirtual) {
-        // 1. Find which VTable contains this method
-        int vtableIdx = -1;
-        int vindex = -1;
-        const auto& vts = static_cast<const RecordType*>(method->parent.get())->vtables();
-        for (size_t i = 0; i < vts.size(); ++i) {
-            for (const auto& ve : vts[i].entries) {
-                if (ve.method->name == method->name) {
-                    vtableIdx = (int)i;
-                    vindex = ve.vtableIndex;
-                    break;
-                }
-            }
-            if (vindex >= 0) break;
-        }
-
-        if (vindex >= 0) {
-            // 2. Adjust basePtr if not the primary VTable
-            u32 vtOffset = vts[vtableIdx].offset;
-            IRValue adjustedThis = basePtr;
-            if (vtOffset > 0) {
-                IRValue offVal = IRValue::constant(types_.intTy(), (u64)vtOffset);
-                IRValue rawPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.charTy()), basePtr);
-                adjustedThis = builder_.gep(types_.charTy(), rawPtr, { offVal });
-            }
-
-            // 3. Load _vptr from adjustedThis
-            TypePtr ptrTy = types_.ptrTo(types_.ptrTo(types_.voidTy()));
-            IRValue vtablePtrAddr = builder_.cast(IROpcode::Bitcast, ptrTy, adjustedThis);
-            IRValue vtable = builder_.load(types_.ptrTo(types_.voidTy()), vtablePtrAddr);
-
-            // 4. Load fn pointer from VTable
-            IRValue offset = IRValue::constant(types_.intTy(), (u64)(vindex * 8)); // 8-byte pointers
-            IRValue fnPtrAddr = builder_.gep(types_.ptrTo(types_.voidTy()), vtable, { offset });
-            IRValue fnPtr = builder_.load(types_.ptrTo(method->type), fnPtrAddr);
-
-            // 5. Call
-            TypePtr retTy = types_.voidTy();
-            if (method->type && method->type->kind() == TypeKind::Function) {
-                retTy = std::static_pointer_cast<FunctionType>(method->type)->returnTypePtr();
-            }
-            std::vector<IRValue> args;
-            args.push_back(adjustedThis);
-            for (auto& arg : e->args) args.push_back(genExpr(arg.get()));
-
-            return builder_.call(retTy, fnPtr, std::move(args));
-        }
+        std::vector<IRValue> args;
+        for (auto& arg : e->args) args.push_back(genExpr(arg.get()));
+        return genVirtualCall(static_cast<const RecordType*>(method->parent.get()), method, basePtr, std::move(args));
     }
 
     // Static call
@@ -1376,7 +1598,69 @@ IRValue IRGen::genMemberCall(const CallExpr* e, IRValue basePtr, const MethodInf
     }
     
     IRValue callee = IRValue::global(types_.ptrTo(method->type), mangledName);
-    return builder_.call(retTy, callee, std::move(args));
+    return genCallInstr(retTy, callee, std::move(args));
+}
+
+IRValue IRGen::genVirtualCall(const RecordType* rt, const MethodInfo* method, IRValue basePtr, std::vector<IRValue> args, bool isDeletingDestructor) {
+    // 1. Find which VTable contains this method
+    int vtableIdx = -1;
+    int vindex = -1;
+    const auto& vts = rt->vtables();
+    for (size_t i = 0; i < vts.size(); ++i) {
+        for (const auto& ve : vts[i].entries) {
+            bool nameMatch = (ve.method->name == method->name);
+            bool dtorMatch = (ve.method->isDestructor && method->isDestructor);
+            
+            if (nameMatch || dtorMatch) {
+                if (isDeletingDestructor == ve.isDeletingDestructor) {
+                    vtableIdx = (int)i;
+                    vindex = ve.vtableIndex;
+                    break;
+                }
+            }
+        }
+        if (vindex >= 0) break;
+    }
+
+    if (vindex < 0) {
+        // Fallback to static call if not in vtable (should not happen if isVirtual)
+        std::string mangledName = isDeletingDestructor ? mangleDeletingDestructor(rt) : mangleMethod(rt, method);
+        IRValue callee = IRValue::global(types_.ptrTo(method->type), mangledName);
+        std::vector<IRValue> callArgs;
+        callArgs.push_back(basePtr);
+        for (auto& a : args) callArgs.push_back(std::move(a));
+        return genCallInstr(types_.voidTy(), callee, std::move(callArgs));
+    }
+
+    // 2. Adjust basePtr if not the primary VTable
+    u32 vtOffset = vts[vtableIdx].offset;
+    IRValue adjustedThis = basePtr;
+    if (vtOffset > 0) {
+        IRValue offVal = IRValue::constant(types_.intTy(), (u64)vtOffset);
+        IRValue rawPtr = builder_.cast(IROpcode::Bitcast, types_.ptrTo(types_.charTy()), basePtr);
+        adjustedThis = builder_.gep(types_.charTy(), rawPtr, { offVal });
+    }
+
+    // 3. Load _vptr from adjustedThis
+    TypePtr ptrTy = types_.ptrTo(types_.ptrTo(types_.voidTy()));
+    IRValue vtablePtrAddr = builder_.cast(IROpcode::Bitcast, ptrTy, adjustedThis);
+    IRValue vtable = builder_.load(types_.ptrTo(types_.voidTy()), vtablePtrAddr);
+
+    // 4. Load fn pointer from VTable
+    IRValue offset = IRValue::constant(types_.intTy(), (u64)vindex);
+    IRValue fnPtrAddr = builder_.gep(types_.ptrTo(types_.voidTy()), vtable, { offset });
+    IRValue fnPtr = builder_.load(types_.ptrTo(method->type), fnPtrAddr);
+
+    // 5. Call
+    TypePtr retTy = types_.voidTy();
+    if (method->type && method->type->kind() == TypeKind::Function) {
+        retTy = std::static_pointer_cast<FunctionType>(method->type)->returnTypePtr();
+    }
+    std::vector<IRValue> callArgs;
+    callArgs.push_back(adjustedThis);
+    for (auto& a : args) callArgs.push_back(std::move(a));
+
+    return genCallInstr(retTy, fnPtr, std::move(callArgs));
 }
 
 IRValue IRGen::genMember(const MemberExpr* e) {
@@ -1717,7 +2001,7 @@ std::string IRGen::makeStringName() {
 }
 
 void IRGen::enterLoop(IRBlock* cont, IRBlock* brk) {
-    loopStack_.push_back({cont, brk});
+    loopStack_.push_back({cont, brk, cleanupStack_.size()});
 }
 
 void IRGen::exitLoop() {
